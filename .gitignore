@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+
+# Django
+*.sqlite3
+backend/.env
+backend/.env.*
+!backend/.env.example
+!backend/.env.docker.example
+
+# Compose volumes / local artifacts
+postgres_data/

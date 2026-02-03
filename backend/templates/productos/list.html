@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+
+{% block title %}Productos{% endblock %}
+
+{% block content %}
+  <div class="card">
+    <h1 style="margin-top:0;">Productos</h1>
+    <p class="muted" style="margin-top:0;">Listado de productos (lectura para usuarios; escritura solo por API y admin).</p>
+
+    <table aria-label="Tabla de productos">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Nombre</th>
+          <th>Precio</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in productos %}
+          <tr>
+            <td>{{ p.id }}</td>
+            <td>{{ p.nombre }}</td>
+            <td>{{ p.precio }}</td>
+            <td><a href="{% url 'producto_detail' p.id %}">Ver</a></td>
+          </tr>
+        {% empty %}
+          <tr>
+            <td colspan="4" class="muted">No hay productos aún.</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endblock %}

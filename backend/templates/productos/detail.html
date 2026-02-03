@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+
+{% block title %}Producto{% endblock %}
+
+{% block content %}
+  <div class="card">
+    <div class="row" style="justify-content:space-between;">
+      <h1 style="margin:0;">{{ producto.nombre }}</h1>
+      <a href="{% url 'productos_list' %}">Volver</a>
+    </div>
+
+    <p class="muted" style="margin-bottom: 6px;">Precio</p>
+    <div style="font-size: 20px; font-weight: 700;">{{ producto.precio }}</div>
+
+    <hr style="border:0; border-top:1px solid rgba(255,255,255,.08); margin: 16px 0;" />
+
+    <p class="muted" style="margin-bottom: 6px;">Descripción</p>
+    <div>{{ producto.descripcion }}</div>
+  </div>
+{% endblock %}
