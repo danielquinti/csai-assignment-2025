@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Catálogo de Productos{% endblock %}</title>
+    <style>
+        /* ── Reset y base ───────────────────── */
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            line-height: 1.6;
+            color: #1a1a1a;
+            background: #f5f5f5;
+            min-height: 100vh;
+        }
+
+        /* ── Header / Nav ───────────────────── */
+        header {
+            background: #1e293b;
+            color: #fff;
+            padding: 1rem 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        header h1 { font-size: 1.25rem; }
+        header nav a {
+            color: #cbd5e1;
+            text-decoration: none;
+            margin-left: 1rem;
+            font-size: 0.9rem;
+        }
+        header nav a:hover { color: #fff; }
+
+        /* ── Main ───────────────────────────── */
+        main {
+            max-width: 960px;
+            margin: 2rem auto;
+            padding: 0 1rem;
+        }
+
+        /* ── Mensajes ───────────────────────── */
+        .messages { list-style: none; margin-bottom: 1rem; }
+        .messages li {
+            padding: 0.75rem 1rem;
+            border-radius: 4px;
+            margin-bottom: 0.5rem;
+        }
+        .messages .success { background: #d1fae5; color: #065f46; }
+        .messages .error   { background: #fee2e2; color: #991b1b; }
+        .messages .warning { background: #fef3c7; color: #92400e; }
+        .messages .info    { background: #dbeafe; color: #1e40af; }
+
+        /* ── Tabla ──────────────────────────── */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: #fff;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        th, td {
+            padding: 0.75rem 1rem;
+            text-align: left;
+            border-bottom: 1px solid #e5e7eb;
+        }
+        th { background: #f8fafc; font-weight: 600; font-size: 0.85rem; text-transform: uppercase; color: #64748b; }
+        tr:last-child td { border-bottom: none; }
+
+        /* ── Botones ────────────────────────── */
+        .btn {
+            display: inline-block;
+            padding: 0.5rem 1rem;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.875rem;
+            text-decoration: none;
+            color: #fff;
+            transition: opacity 0.2s;
+        }
+        .btn:hover { opacity: 0.85; }
+        .btn-primary   { background: #2563eb; }
+        .btn-secondary { background: #64748b; }
+        .btn-danger    { background: #dc2626; }
+        .btn-sm        { padding: 0.35rem 0.75rem; font-size: 0.8rem; }
+
+        /* ── Formularios ────────────────────── */
+        .form-group {
+            margin-bottom: 1rem;
+        }
+        .form-group label {
+            display: block;
+            font-weight: 600;
+            margin-bottom: 0.25rem;
+            font-size: 0.9rem;
+        }
+        .form-group input,
+        .form-group textarea,
+        .form-group select {
+            width: 100%;
+            padding: 0.5rem 0.75rem;
+            border: 1px solid #d1d5db;
+            border-radius: 4px;
+            font-size: 0.95rem;
+        }
+        .form-group input:focus,
+        .form-group textarea:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: #2563eb;
+            box-shadow: 0 0 0 2px rgba(37,99,235,0.2);
+        }
+        .form-card {
+            background: #fff;
+            padding: 2rem;
+            border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            max-width: 480px;
+            margin: 0 auto;
+        }
+        .form-card h2 { margin-bottom: 1.5rem; }
+
+        .errorlist {
+            list-style: none;
+            color: #dc2626;
+            font-size: 0.85rem;
+            margin-top: 0.25rem;
+        }
+
+        .actions { display: flex; gap: 0.5rem; }
+        .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Catálogo de Productos</h1>
+        {% if user.is_authenticated %}
+        <nav>
+            <span>{{ user.username }} ({{ user.rol }})</span>
+            <a href="{% url 'logout' %}">Cerrar sesión</a>
+        </nav>
+        {% endif %}
+    </header>
+    <main>
+        {% if messages %}
+        <ul class="messages">
+            {% for message in messages %}
+            <li class="{{ message.tags }}">{{ message }}</li>
+            {% endfor %}
+        </ul>
+        {% endif %}
+
+        {% block content %}{% endblock %}
+    </main>
+</body>
+</html>

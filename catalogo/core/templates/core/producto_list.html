@@ -1,0 +1,48 @@
+{% extends "core/base.html" %}
+
+{% block title %}Productos – Catálogo{% endblock %}
+
+{% block content %}
+<div class="toolbar">
+    <h2>Productos</h2>
+    {% if es_admin %}
+    <a href="{% url 'producto_create' %}" class="btn btn-primary">Crear Producto</a>
+    {% endif %}
+</div>
+
+{% if productos %}
+<table>
+    <thead>
+        <tr>
+            <th>ID</th>
+            <th>Nombre</th>
+            <th>Precio</th>
+            <th>Descripción</th>
+            <th>Responsable</th>
+            {% if es_admin %}
+            <th>Acciones</th>
+            {% endif %}
+        </tr>
+    </thead>
+    <tbody>
+        {% for producto in productos %}
+        <tr>
+            <td>{{ producto.id }}</td>
+            <td>{{ producto.nombre }}</td>
+            <td>{{ producto.precio }}</td>
+            <td>{{ producto.descripcion }}</td>
+            <td>{{ producto.usuario.username }}</td>
+            {% if es_admin %}
+            <td class="actions">
+                <a href="{% url 'producto_edit' producto.pk %}" class="btn btn-secondary btn-sm">Editar</a>
+                <a href="{% url 'producto_delete' producto.pk %}" class="btn btn-danger btn-sm">Eliminar</a>
+            </td>
+            {% endif %}
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p>No hay productos disponibles.</p>
+{% endif %}
+{% endblock %}
