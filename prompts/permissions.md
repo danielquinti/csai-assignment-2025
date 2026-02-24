@@ -1,5 +1,1 @@
-Método HTTP,Ruta,Acción,Rol: Cliente,Rol: Admin
-GET,/productos,Leer lista,✅ 200 OK (Puede ver),✅ 200 OK (Puede ver)
-POST,/productos,Crear nuevo,❌ 403 Forbidden,✅ 201 Created
-PUT,/productos/:id,Actualizar datos,❌ 403 Forbidden,✅ 200 OK
-DELETE,/productos/:id,Borrar ítem,❌ 403 Forbidden,✅ 200 OK
+Método HTTP,Ruta,Acción,Rol: Cliente,Rol: Admin GET,/productos,Leer lista,✅ 200 OK (Puede ver),✅ 200 OK (Puede ver) POST,/productos,Crear nuevo,❌ 403 Forbidden,✅ 201 Created PUT,/productos/:id,Actualizar datos,❌ 403 Forbidden,✅ 200 OK DELETE,/productos/:id,Borrar ítem,❌ 403 Forbidden,✅ 200 OK
