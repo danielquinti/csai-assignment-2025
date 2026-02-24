@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>@ViewData["Title"] - SecureCatalog</title>
+    <link rel="stylesheet" href="~/css/site.css" />
+</head>
+<body>
+    <header>
+        <nav>
+            <div class="nav-container">
+                <a href="/Products" class="nav-brand">SecureCatalog</a>
+                <div class="nav-links">
+                    @if (User?.Identity?.IsAuthenticated == true)
+                    {
+                        <a href="/Products">Productos</a>
+                        <span class="nav-user">
+                            @User.Identity.Name
+                            @if (User.IsInRole("Admin"))
+                            {
+                                <span class="badge-admin">Admin</span>
+                            }
+                            else
+                            {
+                                <span class="badge-cliente">Cliente</span>
+                            }
+                        </span>
+                        <form method="post" action="/Account/Logout" class="nav-logout-form">
+                            @Html.AntiForgeryToken()
+                            <button type="submit" class="btn-link">Cerrar Sesión</button>
+                        </form>
+                    }
+                    else
+                    {
+                        <a href="/Account/Login">Iniciar Sesión</a>
+                    }
+                </div>
+            </div>
+        </nav>
+    </header>
+
+    <main class="container">
+        @if (TempData["SuccessMessage"] != null)
+        {
+            <div class="alert alert-success">@TempData["SuccessMessage"]</div>
+        }
+        @if (TempData["ErrorMessage"] != null)
+        {
+            <div class="alert alert-error">@TempData["ErrorMessage"]</div>
+        }
+        @RenderBody()
+    </main>
+
+    <footer>
+        <div class="container">
+            <p>&copy; @DateTime.UtcNow.Year SecureCatalog — Zero Trust Architecture — No JavaScript</p>
+        </div>
+    </footer>
+</body>
+</html>

@@ -1,0 +1,16 @@
+@page
+@model SecureCatalog.Pages.ErrorModel
+@{
+    ViewData["Title"] = "Error";
+}
+
+<div class="auth-container">
+    <h1>Error</h1>
+    <p>Ha ocurrido un error al procesar su solicitud.</p>
+    @if (!string.IsNullOrEmpty(Model.RequestId))
+    {
+        <p><strong>ID de Solicitud:</strong> @Model.RequestId</p>
+    }
+    <p>Por favor, intente de nuevo más tarde.</p>
+    <a href="/Products" class="btn btn-primary">Volver al Catálogo</a>
+</div>

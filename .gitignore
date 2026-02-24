@@ -1,38 +1,30 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-*.egg-info/
-dist/
-build/
-*.egg
+## .NET
+bin/
+obj/
+*.user
+*.suo
+*.vs/
+.vs/
 
-# Virtual environment
-venv/
-.venv/
-env/
+## Data Protection Keys (sensitive - never commit)
+Keys/
 
-# Environment variables
-.env
+## User Secrets
+secrets.json
 
-# Django
-*.log
-db.sqlite3
-db.sqlite3-journal
-staticfiles/
-media/
+## Build outputs
+publish/
+out/
 
-# Docker
-docker-compose.override.yml
-
-# IDE
-.vscode/
+## IDE
 .idea/
 *.swp
-*.swo
 *~
 
-# OS
-.DS_Store
+## OS
 Thumbs.db
+.DS_Store
+
+## NuGet
+*.nupkg
+packages/

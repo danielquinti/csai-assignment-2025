@@ -1,0 +1,41 @@
+@page "{id:guid}"
+@model SecureCatalog.Pages.Products.DetailModel
+@{
+    ViewData["Title"] = "Detalle del Producto";
+}
+
+<h1>Detalle del Producto</h1>
+
+@if (Model.Product != null)
+{
+    <div class="product-detail">
+        <dl>
+            <dt>Nombre</dt>
+            <dd>@Html.DisplayFor(_ => Model.Product.Nombre)</dd>
+
+            <dt>Precio</dt>
+            <dd>@Model.Product.Precio.ToString("C2")</dd>
+
+            <dt>Descripción</dt>
+            <dd>@Html.DisplayFor(_ => Model.Product.Descripcion)</dd>
+
+            @if (User.IsInRole("Admin"))
+            {
+                <dt>Propietario</dt>
+                <dd>@Html.DisplayFor(_ => Model.Product.OwnerUserName)</dd>
+            }
+        </dl>
+
+        <div class="actions-bar">
+            <a href="/Products" class="btn btn-secondary">Volver al Catálogo</a>
+            @if (User.IsInRole("Admin"))
+            {
+                <a href="/Products/Edit/@Model.Product.Id" class="btn btn-primary">Editar</a>
+                <form method="post" action="/Products/Delete/@Model.Product.Id" class="inline-form">
+                    @Html.AntiForgeryToken()
+                    <button type="submit" class="btn btn-danger">Eliminar</button>
+                </form>
+            }
+        </div>
+    </div>
+}

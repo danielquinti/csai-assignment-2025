@@ -1,0 +1,59 @@
+@page
+@model SecureCatalog.Pages.Products.IndexModel
+@{
+    ViewData["Title"] = "Catálogo de Productos";
+}
+
+<h1>Catálogo de Productos</h1>
+
+@if (User.IsInRole("Admin"))
+{
+    <div class="actions-bar">
+        <a href="/Products/Create" class="btn btn-primary">Crear Nuevo Producto</a>
+    </div>
+}
+
+@if (Model.Products.Any())
+{
+    <table class="product-table">
+        <thead>
+            <tr>
+                <th>Nombre</th>
+                <th>Precio</th>
+                <th>Descripción</th>
+                @if (User.IsInRole("Admin"))
+                {
+                    <th>Propietario</th>
+                    <th>Acciones</th>
+                }
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var product in Model.Products)
+            {
+                <tr>
+                    <td>
+                        <a href="/Products/Detail/@product.Id">@Html.DisplayFor(_ => product.Nombre)</a>
+                    </td>
+                    <td>@product.Precio.ToString("C2")</td>
+                    <td>@Html.DisplayFor(_ => product.Descripcion)</td>
+                    @if (User.IsInRole("Admin"))
+                    {
+                        <td>@Html.DisplayFor(_ => product.OwnerUserName)</td>
+                        <td class="actions-cell">
+                            <a href="/Products/Edit/@product.Id" class="btn btn-sm btn-secondary">Editar</a>
+                            <form method="post" action="/Products/Delete/@product.Id" class="inline-form">
+                                @Html.AntiForgeryToken()
+                                <button type="submit" class="btn btn-sm btn-danger">Eliminar</button>
+                            </form>
+                        </td>
+                    }
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+else
+{
+    <p class="no-data">No hay productos disponibles.</p>
+}
