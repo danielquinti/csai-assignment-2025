@@ -1,0 +1,584 @@
+################################################################################
+#                     GUIA DE DESPLIEGUE — SecureCatalog                       #
+#        Cada fase es un bloque copiable. Ejecutar en orden.                   #
+################################################################################
+
+
+# ==============================================================================
+# FASE 1: CREAR Y CONFIGURAR LA MAQUINA VIRTUAL
+# Ejecutar en: VirtualBox (GUI) + consola de la VM
+# ==============================================================================
+
+# --- 1.1 Crear la VM en VirtualBox (GUI) ---
+# - Imagen: Windows Server
+# - RAM: 4096 MB
+# - CPUs: 2
+# - Disco: 50 GB
+
+
+# --- 1.2 Configurar redes (ANTES de arrancar la VM) ---
+# En VirtualBox:
+#   - Adaptador 1: NAT (acceso a internet)
+#   - Adaptador 2: Host-Only con IP estática
+#     - Prefijo IPv4: 192.168.56.1
+#     - Mascara: 255.255.255.0
+#     - DHCP: desactivado
+
+
+# - Sistema -> Placa base -> Activar UEFI y Secure Boot
+# --- 1.3 Instalacion de Windows ---
+# Cuando aparezca la pantalla de seleccionar volumen de almacenamiento:
+# eliminar el volumen existente y despues seleccionarlo de nuevo.
+# - Attended installation: contraseña *(Aa}N#27260
+
+# --- 1.4 Configurar IP estatica en la VM (ejecutar en la consola de la VM) ---
+# Identificar el indice del adaptador Host-Only (el que no tiene puerta de enlace):
+Get-NetAdapter
+ipconfig
+
+# Mostrar adaptadores para identificar el Host-Only (el que NO tiene puerta de enlace)
+Get-NetAdapter | Format-Table Name, InterfaceIndex, Status -AutoSize
+ipconfig
+
+# Sustituir X por el indice del adaptador Host-Only correcto:
+$adapterIndex = Read-Host "Introduce el InterfaceIndex del adaptador Host-Only"
+New-NetIPAddress -InterfaceIndex $adapterIndex -IPAddress 192.168.56.10 -PrefixLength 24
+
+# ==============================================================================
+# FASE 1.5: HABILITAR SSH
+# Ejecutar en: consola de la VM
+# Permite administrar el servidor remotamente desde el host.
+# ==============================================================================
+
+# Abrir el puerto 22 en el firewall sin desactivar el firewall completo
+New-NetFirewallRule -Name "Allow_SSH" -DisplayName "Allow SSH (TCP 22)" -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22
+
+# Configurar el servicio SSH para que arranque automaticamente
+Set-Service -Name sshd -StartupType Automatic
+Start-Service sshd
+
+# --- Menu inicial de SConfig (ejecutar manualmente) ---
+# 1. Actualizar > Todas las actualizaciones de calidad > Todas
+# Pulsar enter para que avance
+# 2. Cambiar nombre del equipo PENDIENTE!
+
+
+
+# ==============================================================================
+# FASE 1.7: BITLOCKER — Cifrado del disco
+# Ejecutar en: consola de la VM (requiere reinicio)
+# Protege los datos en reposo si alguien accede al disco fisico.
+# PREREQUISITO: Secure Boot activado en la VM, si no pedira la clave cada arranque.
+# ==============================================================================
+
+# Instalar la feature de BitLocker (reinicia automaticamente)
+Install-WindowsFeature BitLocker -Restart
+
+# --- Despues del reinicio: ---
+# En VirtualBox:
+#   - Sistema -> Placa base -> Activar TPM 2.0
+#   - Almacenamiento -> Eliminar el CD con la imagen de Windows
+
+# Verificar que el TPM esta disponible
+Get-Tpm
+
+# Crear protector de clave de recuperacion (GUARDAR esta clave)
+Add-BitLockerKeyProtector -MountPoint "C:" -RecoveryPasswordProtector
+# Clave de recuperacion: 645623-718168-367730-614449-013959-572715-575498-041371
+
+# Activar BitLocker con protector TPM
+Enable-BitLocker -MountPoint "C:" -EncryptionMethod Aes256 -TpmProtector -UsedSpaceOnly
+Restart-Computer
+
+# Verificar progreso del cifrado despues del reinicio
+Get-BitLockerVolume -MountPoint "C:"
+#Cuando esté encriptado
+Restart-Computer
+
+
+# ==============================================================================
+# FASE 2.5: HABILITAR SSH CON PRIVILEGIOS DE ADMINISTRADOR
+# Problema: las sesiones SSH en Windows Server no se elevan a admin
+# aunque el usuario pertenezca al grupo Administrators.
+# Sin esto, las fases 3-5 fallan si se ejecutan por SSH.
+# ==============================================================================
+
+# --- PASO A: Crear y enviar el script de fix (ejecutar en el HOST) ---
+@'
+# Comentar la directiva que fuerza shell restringido para administradores
+$f = "C:\ProgramData\ssh\sshd_config"
+(Get-Content $f) -replace '^(Match Group administrators)', '# $1' -replace '^\s+(ForceCommand .+)', '# $1' | Set-Content $f
+# Establecer PowerShell como shell por defecto de SSH
+New-ItemProperty -Path "HKLM:\SOFTWARE\OpenSSH" -Name DefaultShell -Value "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -PropertyType String -Force
+Restart-Service sshd
+Write-Host "OK - Reconecta SSH para tener privilegios de admin"
+'@ | Out-File -FilePath "$env:TEMP\fix-ssh.ps1" -Encoding UTF8
+
+scp "$env:TEMP\fix-ssh.ps1" Administrador@192.168.56.10:C:/Users/Administrador/fix-ssh.ps1
+
+# --- PASO B: Ejecutar el script en la CONSOLA de la VM (no por SSH) ---
+powershell -File C:\Users\Administrador\fix-ssh.ps1
+
+# --- PASO C: Verificar (reconectar por SSH desde el HOST) ---
+ssh Administrador@192.168.56.10
+([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+# Debe devolver: True
+
+# ==============================================================================
+# FASE 2: INSTALAR DEPENDENCIAS (IIS + .NET + SQL Server)
+# Ejecutar en: servidor (VM) salvo donde se indique HOST
+# ==============================================================================
+
+# --- 2.1 Instalar IIS ---
+Install-WindowsFeature -Name Web-Server -IncludeManagementTools
+
+# --- 2.2 Instalar ASP.NET Core Hosting Bundle ---
+# Descargar en el HOST y copiar al servidor:
+Invoke-WebRequest -Uri "https://aka.ms/dotnet/8.0/dotnet-hosting-win.exe" -OutFile "$env:TEMP\dotnet-hosting.exe"
+scp "$env:TEMP\dotnet-hosting.exe" Administrador@192.168.56.10:C:/Users/Administrador/dotnet-hosting.exe
+
+# Instalar en el SERVIDOR:
+& "C:\Users\Administrador\dotnet-hosting.exe" /install /quiet /norestart
+
+# Verificar que el modulo se instalo correctamente (esperar ~1 min a que termine)
+Get-WebGlobalModule -Name "AspNetCoreModuleV2"
+iisreset
+
+# --- 2.6 Instalar SQL Server Express ---
+# Descargar en el HOST y copiar al servidor:
+Invoke-WebRequest -Uri "https://download.microsoft.com/download/3/8/d/38de7036-2433-4207-8eae-06e247e17b25/SQLEXPR_x64_ENU.exe" -OutFile "$env:TEMP\SQLEXPR_x64_ENU.exe"
+scp "$env:TEMP\SQLEXPR_x64_ENU.exe" Administrador@192.168.56.10:"C:\Users\Administrador\AppData\Local\Temp\"
+
+# Instalar silenciosamente en el SERVIDOR:
+& "$env:TEMP\SQLEXPR_x64_ENU.exe" /Q /ACTION=Install /IACCEPTSQLSERVERLICENSETERMS /FEATURES=SQLEngine /INSTANCENAME=SQLEXPRESS /SQLSVCACCOUNT="NT AUTHORITY\Network Service" /SQLSYSADMINACCOUNTS="BUILTIN\Administrators" /TCPENABLED=1 /NPENABLED=0 /UPDATEENABLED=0
+
+# Verificar que se instalo y esta corriendo
+Get-Process -Name "setup" -ErrorAction SilentlyContinue
+Get-Service -Name "MSSQL*"
+
+# Arrancar el servicio si no esta corriendo
+Start-Service -Name 'MSSQL$SQLEXPRESS'
+
+# --- 2.7 Crear login SQL dedicado (principio de minimo privilegio) ---
+$sqlConnection = New-Object System.Data.SqlClient.SqlConnection("Server=localhost\SQLEXPRESS;Integrated Security=True;")
+$sqlConnection.Open()
+$sqlCommand = $sqlConnection.CreateCommand()
+$sqlCommand.CommandText = "CREATE LOGIN [SecureCatalogApp] WITH PASSWORD = 'awita12A', CHECK_POLICY = ON;"
+$sqlCommand.ExecuteNonQuery()
+$sqlConnection.Close()
+Write-Host "Login 'SecureCatalogApp' created successfully!" -ForegroundColor Green
+
+# --- 2.8 Configurar connection string como variable de entorno ---
+# NUNCA guardar credenciales en appsettings.json ni en el repositorio.
+# ASP.NET Core lee ConnectionStrings__DefaultConnection automaticamente.
+[Environment]::SetEnvironmentVariable(
+    "ConnectionStrings__DefaultConnection",
+    "Server=localhost\SQLEXPRESS;Database=SecureCatalogDb;Trusted_Connection=True;MultipleActiveResultSets=true;TrustServerCertificate=True;Encrypt=True;",
+    "Machine"
+)
+
+# Refrescar la sesion actual para que la variable este disponible inmediatamente
+$env:ConnectionStrings__DefaultConnection = [Environment]::GetEnvironmentVariable("ConnectionStrings__DefaultConnection", "Machine")
+
+# --- 2.4 Publicar la app (ejecutar en el HOST) ---
+cd C:\Users\danie\csai-assignment-2025\src\SecureCatalog; dotnet restore; dotnet publish -c Release
+
+# --- 2.5 Copiar el publicado al servidor (ejecutar en el HOST) ---
+scp -r "C:\Users\danie\csai-assignment-2025\src\SecureCatalog\bin\Release\net8.0\publish" vboxuser@192.168.56.10:C:/Users/vboxuser/SecureCatalog_Publish
+
+
+# ==============================================================================
+# FASE 3: GENERAR CERTIFICADO TLS AUTOFIRMADO
+# Ejecutar en: servidor (por SSH o consola, como Administrador)
+# Necesario para que IIS sirva HTTPS.
+# ==============================================================================
+
+# Generar certificado autofirmado valido para la IP del servidor y localhost
+$cert = New-SelfSignedCertificate `
+    -DnsName "192.168.56.10", "localhost", "$env:COMPUTERNAME" `
+    -CertStoreLocation "Cert:\LocalMachine\My" `
+    -NotAfter (Get-Date).AddYears(2) `
+    -KeyAlgorithm RSA -KeyLength 2048 `
+    -FriendlyName "SecureCatalog IIS"
+
+# Guardar el thumbprint — se necesita en la Fase 4 para vincular HTTPS
+$thumbprint = $cert.Thumbprint
+Write-Host "Thumbprint del certificado: $thumbprint"
+# >>> ANOTAR ESTE VALOR <<<
+
+
+# ==============================================================================
+# FASE 4: DESPLIEGUE, CONFIGURACION HTTPS Y PERMISOS EN IIS
+# Ejecutar en: servidor (como Administrador)
+# Configura el sitio web, vincula el certificado TLS y da acceso a SQL Server.
+# ==============================================================================
+
+Import-Module WebAdministration
+
+# --- Variables ---
+$appPath = "C:\inetpub\wwwroot\SecureCatalog"
+$appName = "SecureCatalog"
+$appPoolName = "SecureCatalogPool"
+# Recuperar el thumbprint automaticamente del certificado generado en Fase 3
+$thumbprint = (Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.FriendlyName -eq "SecureCatalog IIS" }).Thumbprint
+if (-not $thumbprint) { Write-Error "No se encontro el certificado 'SecureCatalog IIS'. Ejecuta la Fase 3 primero."; return }
+Write-Host "Usando certificado con thumbprint: $thumbprint"
+
+# --- 4.1 Preparar el directorio y mover los archivos publicados ---
+New-Item -ItemType Directory -Path "$appPath\Keys" -Force
+Move-Item -Path "C:\Users\vboxuser\SecureCatalog_Publish\*" -Destination $appPath -Force
+
+# --- 4.2 Configurar el Application Pool ---
+# managedRuntimeVersion vacio = "Sin codigo administrado" (necesario para .NET 8 out-of-process)
+New-WebAppPool -Name $appPoolName -ErrorAction SilentlyContinue
+Set-ItemProperty -Path "IIS:\AppPools\$appPoolName" -Name "managedRuntimeVersion" -Value ""
+Set-ItemProperty -Path "IIS:\AppPools\$appPoolName" -Name "autoStart" -Value "True"
+
+# --- 4.3 Eliminar el sitio por defecto de IIS ---
+# Si no se elimina, seguira sirviendo la landing de Windows Server en el puerto 80
+Stop-Website -Name "Default Web Site" -ErrorAction SilentlyContinue
+Remove-Website -Name "Default Web Site" -ErrorAction SilentlyContinue
+
+# --- 4.4 Crear el sitio web con HTTPS (443) + HTTP (80) para redireccion ---
+Remove-Website -Name $appName -ErrorAction SilentlyContinue
+New-Website -Name $appName -PhysicalPath $appPath -ApplicationPool $appPoolName -Port 443 -IPAddress "*" -HostHeader "" -Ssl -Force
+# El binding HTTP en puerto 80 permite que la app redirija automaticamente a HTTPS
+New-WebBinding -Name $appName -Protocol "http" -Port 80 -IPAddress "*"
+
+# --- 4.5 Vincular el certificado TLS al sitio ---
+# Usa netsh porque es mas fiable que el cmdlet AddSslCertificate
+$appId = [guid]::NewGuid().ToString()
+netsh http add sslcert ipport=0.0.0.0:443 certhash=$thumbprint appid="{$appId}" certstorename=My
+Write-Host "Certificado vinculado al sitio HTTPS"
+
+# --- 4.6 Configurar permisos del sistema de archivos ---
+# Limpiar permisos heredados rotos
+icacls $appPath /reset /T /C /Q
+# Lectura y ejecucion para el AppPool en todo el sitio
+icacls $appPath /grant "IIS AppPool\${appPoolName}:(OI)(CI)RX" /T
+# Modificacion en Keys/ para que Data Protection pueda escribir el key ring
+icacls "$appPath\Keys" /grant "IIS AppPool\${appPoolName}:(OI)(CI)M" /T
+# Lectura para usuarios anonimos (necesario para archivos estaticos)
+icacls $appPath /grant "IUSR:(OI)(CI)RX" /T
+
+# --- 4.7 Dar acceso al AppPool a SQL Server ---
+# La app usa Trusted_Connection=True, asi que se conecta con la identidad Windows
+# del AppPool (IIS AppPool\SecureCatalogPool). Sin este paso, la app no puede
+# conectar a la BD y crashea con 500.30.
+# Se usa db_owner porque MigrateAsync() necesita crear tablas (DDL) en el primer arranque.
+$sqlConn = New-Object System.Data.SqlClient.SqlConnection("Server=localhost\SQLEXPRESS;Integrated Security=True;")
+$sqlConn.Open()
+$cmd = $sqlConn.CreateCommand()
+$cmd.CommandText = "IF DB_ID('SecureCatalogDb') IS NULL CREATE DATABASE SecureCatalogDb;"
+$cmd.ExecuteNonQuery()
+$cmd.CommandText = "IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name = 'IIS AppPool\SecureCatalogPool') CREATE LOGIN [IIS AppPool\SecureCatalogPool] FROM WINDOWS;"
+$cmd.ExecuteNonQuery()
+$cmd.CommandText = "USE SecureCatalogDb; IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = 'IIS AppPool\SecureCatalogPool') CREATE USER [IIS AppPool\SecureCatalogPool] FOR LOGIN [IIS AppPool\SecureCatalogPool]; ALTER ROLE db_owner ADD MEMBER [IIS AppPool\SecureCatalogPool];"
+$cmd.ExecuteNonQuery()
+$sqlConn.Close()
+Write-Host "AppPool identity granted access to SecureCatalogDb" -ForegroundColor Green
+
+# --- 4.8 Reinicio limpio ---
+Stop-Website -Name $appName -ErrorAction SilentlyContinue
+Restart-WebAppPool -Name $appPoolName
+Start-Website -Name $appName
+
+
+# ==============================================================================
+# FASE 5: APERTURA DEL FIREWALL Y PRUEBA FINAL
+# Ejecutar en: servidor (como Administrador)
+# ==============================================================================
+
+# --- 5.1 Abrir puerto 443 (HTTPS) en el firewall ---
+New-NetFirewallRule -DisplayName "SecureCatalog HTTPS (443)" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 443
+
+# --- 5.2 Abrir puerto 80 (HTTP) para que la redireccion a HTTPS funcione ---
+New-NetFirewallRule -DisplayName "SecureCatalog HTTP (80)" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 80
+
+# --- NOTA: Si ya ejecutaste la Fase 4 antes de estos cambios, aplica el fix: ---
+# Import-Module WebAdministration
+# Stop-Website -Name "Default Web Site" -ErrorAction SilentlyContinue
+# Remove-Website -Name "Default Web Site" -ErrorAction SilentlyContinue
+# New-WebBinding -Name "SecureCatalog" -Protocol "http" -Port 80 -IPAddress "*"
+# Restart-WebAppPool -Name "SecureCatalogPool"
+
+# --- 5.3 Probar desde el navegador del HOST ---
+# Abrir: https://192.168.56.10 (aceptar aviso de certificado autofirmado)
+
+
+# ==============================================================================
+# FASE 6: CONFIGURAR IIS PARA ARRANQUE AUTOMATICO (SIN LOGIN)
+# Ejecutar en: servidor (como Administrador)
+# Garantiza que IIS y la app esten disponibles desde el arranque del SO,
+# sin necesidad de que ningun usuario inicie sesion en la maquina.
+# ==============================================================================
+
+# --- 6.1 Dependencia de arranque: IIS espera a SQL Server ---
+# Sin esto, IIS arranca el AppPool ANTES de que SQL Server este listo.
+# La app llama MigrateAsync() al iniciar, falla la conexion y crashea con 500.30.
+# Con esta dependencia, Windows no arranca W3SVC hasta que MSSQL$SQLEXPRESS este Running.
+cmd /c 'sc config W3SVC depend= "WAS/MSSQL$SQLEXPRESS"'
+
+# Verificar que la dependencia se registro
+sc.exe qc W3SVC
+
+# --- 6.2 Asegurar arranque automatico de los servicios de IIS ---
+# W3SVC = World Wide Web Publishing Service (sirve peticiones HTTP/HTTPS)
+# WAS   = Windows Process Activation Service (gestiona los Application Pools)
+Set-Service -Name W3SVC -StartupType Automatic
+Set-Service -Name WAS   -StartupType Automatic
+
+# Verificar que estan configurados correctamente
+Get-Service W3SVC, WAS | Select-Object Name, StartType, Status
+
+# --- 6.3 Configurar el AppPool en modo AlwaysRunning ---
+# Por defecto el AppPool arranca "OnDemand" (espera la primera peticion HTTP).
+# Con AlwaysRunning se inicia junto con IIS, eliminando el cold-start.
+Import-Module WebAdministration
+Set-ItemProperty -Path "IIS:\AppPools\SecureCatalogPool" -Name "startMode" -Value "AlwaysRunning"
+
+# Verificar la configuracion
+Get-ItemProperty -Path "IIS:\AppPools\SecureCatalogPool" -Name "startMode"
+Get-ItemProperty -Path "IIS:\AppPools\SecureCatalogPool" -Name "autoStart"
+# autoStart debe ser True (ya configurado en Fase 4.2)
+# startMode debe ser AlwaysRunning
+
+# ==============================================================================
+# PECHAR MAQUINA PARA ENTREGAR
+# Ejecutar en: servidor (como Administrador)
+# Hardening final antes de la entrega.
+# ==============================================================================
+
+
+# ==============================================================================
+# HARDENING DE CUENTAS DE USUARIO
+# Ejecutar en: servidor (como Administrador)
+# ==============================================================================
+
+# --- Ver cuentas activas (DefaultAccount y WDAGUtilityAccount se ignoran) ---
+net user
+
+# --- Renombrar la cuenta de administrador a "user2" ---
+# Elegimos un nombre que pase desapercibido (No uses 'Admin', 'Root' o 'God')
+$nuevoAdmin = "user2"
+Rename-LocalUser -Name "Administrador" -NewName $nuevoAdmin
+Write-Host "Nombre de Administrador oculto como: $nuevoAdmin" -ForegroundColor Green
+
+# --- Desactivar al Invitado y renombrar a "user3" ---
+Disable-LocalUser -Name "Invitado"
+Rename-LocalUser -Name "Invitado" -NewName "user3"
+
+# --- Reiniciar antes de continuar ---
+Write-Host "[!] Reinicia el servidor antes de continuar. Ejecuta: Restart-Computer" -ForegroundColor Yellow
+Read-Host "Pulsa ENTER cuando hayas reiniciado y vuelvas a tener sesion"
+
+# --- Verificar cuentas ---
+Get-LocalUser | Select-Object Name, SID, Enabled
+
+# ==============================================================================
+# HONEYTOKEN — Crear cuenta falsa "Administrador" sin permisos
+# ==============================================================================
+
+# --- Crear el falso admin ---
+$passSenuelo = ConvertTo-SecureString "7Vs*AGgRa3ca" -AsPlainText -Force
+New-LocalUser -Name "Administrador" -Password $passSenuelo -Description "Cuentas de gestion de backups" -PasswordNeverExpires
+
+# --- Reiniciar antes de verificar ---
+Write-Host "[!] Reinicia el servidor antes de continuar. Ejecuta: Restart-Computer" -ForegroundColor Yellow
+Read-Host "Pulsa ENTER cuando hayas reiniciado y vuelvas a tener sesion"
+
+# --- Verificar que no esta en ningun grupo (no deberia) ---
+Get-LocalGroup | Where-Object { Get-LocalGroupMember $_ | Where-Object {$_.Name -match "Administrador"} }
+
+# --- Bloqueo de inicio de sesion (aunque se acierte la contrasena, no podra acceder) ---
+# 1. Exportar la configuracion actual a un archivo temporal
+secedit /export /cfg C:\sec.cfg
+
+# 2. Anadir la denegacion de inicio de sesion para el falso "Administrador"
+# Esto impide que entre por consola, por red o por servicios remotos
+$config = Get-Content C:\sec.cfg
+$config = $config -replace 'SeDenyNetworkLogonRight = ', 'SeDenyNetworkLogonRight = Administrador,'
+$config = $config -replace 'SeDenyInteractiveLogonRight = ', 'SeDenyInteractiveLogonRight = Administrador,'
+$config | Set-Content C:\sec.cfg
+
+# 3. Importar la nueva configuracion
+secedit /configure /db $env:windir\security\local.sdb /cfg C:\sec.cfg /areas USER_RIGHTS
+
+# 4. Limpiar rastro
+Remove-Item C:\sec.cfg
+
+# --- Restringir acceso al sistema de archivos (tarda un poco) ---
+$acl = Get-Acl "C:\"
+$rule = New-Object System.Security.AccessControl.FileSystemAccessRule("Administrador","FullControl","Deny")
+$acl.AddAccessRule($rule)
+Set-Acl "C:\" $acl
+Write-Host "[+] Honeytoken 'Administrador' creado, bloqueado y sin acceso a disco." -ForegroundColor Green
+
+# --- Reiniciar ---
+Write-Host "[!] Reinicia el servidor antes de continuar. Ejecuta: Restart-Computer" -ForegroundColor Yellow
+Read-Host "Pulsa ENTER cuando hayas reiniciado y vuelvas a tener sesion"
+
+# ==============================================================================
+# TODO: Crear usuario con privilegios minimos (user1)
+# A partir de aqui, para funcionar como admin primero hay que loguearse
+# con un usuario sin admin.
+# ==============================================================================
+
+
+
+# Desactivar el auto-login (seguridad: no dejar sesion abierta desatendida)
+Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" -Name "AutoAdminLogon" -Value "0"
+
+- Pedir usuario y contraseña al iniciar (en vez de sugerir usuario y pedir solo contraseña)
+```
+# Forzar a que no se muestre el último nombre de usuario en la pantalla de logon
+Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "dontdisplaylastusername" -Value 1
+```
+PENDIENTE! No funciona
+
+# --- 1. Politica de bloqueo contra fuerza bruta ---
+net accounts /lockoutthreshold:10
+net accounts /lockoutduration:15
+net accounts /lockoutwindow:15
+Write-Host "[+] Politica de bloqueo configurada (10 intentos, 15 min lockout)." -ForegroundColor Green
+
+# --- 2. Deshabilitar SSH (ya no se necesita) ---
+Stop-Service sshd -ErrorAction SilentlyContinue
+Set-Service -Name sshd -StartupType 'Disabled' -ErrorAction SilentlyContinue
+Remove-NetFirewallRule -Name "Allow_SSH" -ErrorAction SilentlyContinue
+Write-Host "[+] SSH deshabilitado y regla de firewall eliminada." -ForegroundColor Green
+
+# --- 3. Firewall: bloquear todo y permitir solo HTTP/HTTPS ---
+Set-NetFirewallProfile -Profile Domain,Public,Private -DefaultInboundAction Block -DefaultOutboundAction Block
+New-NetFirewallRule -DisplayName "Allow_HTTP" -Direction Inbound -LocalPort 80 -Protocol TCP -Action Allow
+New-NetFirewallRule -DisplayName "Allow_HTTPS" -Direction Inbound -LocalPort 443 -Protocol TCP -Action Allow
+Write-Host "[+] Firewall bloqueado. Solo puertos 80 y 443 abiertos." -ForegroundColor Green
+
+# --- 4. Eliminar servicios prescindibles ---
+$servicesToStop = @(
+    "LanmanServer",   # SMB Server
+    "lmhosts",        # NetBIOS
+    "Dhcp",           # No necesario con IP Estatica
+    "DiagTrack",      # Telemetria
+    "W32Time",        # Sincronizacion por Hyper-V, no NTP
+    "TermService",    # Escritorio Remoto (RDP)
+    "Spooler"         # Cola de impresion
+)
+
+foreach ($service in $servicesToStop) {
+    if (Get-Service $service -ErrorAction SilentlyContinue) {
+        Stop-Service -Name $service -Force -ErrorAction SilentlyContinue
+        Set-Service -Name $service -StartupType Disabled
+        Write-Host "[-] Servicio $service deshabilitado." -ForegroundColor Yellow
+    }
+}
+
+# --- Hardening de red ---
+# Deshabilitar IPv6 para reducir la superficie de ataque (el Red Team suele usar IPv6 para saltarse firewalls mal configurados)
+Disable-NetAdapterBinding -Name "Ethernet" -ComponentID ms_tcpip6
+# Deshabilitar NetBIOS (evita que el servidor "grite" su nombre en la red)
+$regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\NetBT\Parameters\Interfaces"
+Get-ChildItem $regPath | ForEach-Object { Set-ItemProperty -Path $_.PSPath -Name "NetbiosOptions" -Value 2 }
+
+
+# --- 5. TODO: Eliminar binarios prescindibles ---
+# Pendiente de definir que binarios eliminar
+
+# ==============================================================================
+# SYSMON — Monitoreo ofuscado de red, disco y procesos
+# PREREQUISITO: Descargar Sysmon en el HOST y copiarlo a la VM
+#   1. Descargar de https://learn.microsoft.com/es-es/sysinternals/downloads/sysmon
+#   2. scp "C:\...\Downloads\Sysmon.zip" vboxuser@192.168.56.10:C:\
+# Ejecutar en: servidor (como Administrador)
+# ==============================================================================
+
+# --- Crear carpeta de "sistema" falsa, extraer y ofuscar ---
+New-Item -Path "C:\Windows\System32\Drivers\en-US\NetworkData" -ItemType Directory -Force
+Expand-Archive -Path "C:\Sysmon.zip" -DestinationPath "C:\Windows\System32\Drivers\en-US\NetworkData"
+Set-Location "C:\Windows\System32\Drivers\en-US\NetworkData"
+Rename-Item -Path ".\Sysmon64.exe" -NewName "WinNetSvc.exe"
+
+# --- Configuracion del SIEM ---
+$xmlPath = "C:\Windows\System32\Drivers\en-US\NetworkData\WinNetSvc.xml"
+
+$config = @"
+<Sysmon schemaversion="4.90">
+  <EventFiltering>
+    <NetworkConnect onmatch="include">
+      <DestinationPort condition="is">80</DestinationPort>
+      <DestinationPort condition="is">443</DestinationPort>
+    </NetworkConnect>
+    <RawAccessRead onmatch="include">
+      <Device condition="contains">BaseDeDatos</Device>
+    </RawAccessRead>
+    <ProcessAccess onmatch="include">
+      <TargetImage condition="is">C:\Windows\system32\lsass.exe</TargetImage>
+    </ProcessAccess>
+  </EventFiltering>
+</Sysmon>
+"@
+
+[System.IO.File]::WriteAllText($xmlPath, $config, [System.Text.Encoding]::ASCII)
+
+# --- Instalacion del driver camuflado ---
+.\WinNetSvc.exe -s
+.\WinNetSvc.exe -accepteula -i -d vmxnet3_svc
+.\WinNetSvc.exe -c $xmlPath
+
+# --- Asegurar flujo del SIEM (script de recoleccion continua) ---
+$logDir = "C:\Windows\System32\Config\TxR\Diagnostics"
+$scriptPath = "C:\Windows\System32\Drivers\en-US\NetworkData\InternalAudit.ps1"
+
+$scriptContent = @"
+`$logFile = '$logDir\sys_data.dat'
+`$lastId = 0
+
+if (!(Test-Path `$logFile)) { New-Item -Path `$logFile -ItemType File -Force }
+
+while (`$true) {
+    try {
+        `$events = Get-WinEvent -LogName 'Microsoft-Windows-Sysmon/Operational' -ErrorAction SilentlyContinue | Where-Object { `$_.RecordId -gt `$lastId }
+        if (`$events) {
+            foreach (`$e in `$events) {
+                `$line = "[`$(`$e.TimeCreated)] ID=`$(`$e.Id) MSG=`$(`$e.Message)"
+                `$line | Out-File -FilePath `$logFile -Append -Encoding ascii
+                `$lastId = `$e.RecordId
+            }
+        }
+    } catch {}
+    Start-Sleep -Seconds 5
+}
+"@
+
+$scriptContent | Out-File -FilePath $scriptPath -Encoding ascii
+
+# --- Lanzar en oculto ---
+Start-Process powershell.exe -ArgumentList "-ExecutionPolicy Bypass -WindowStyle Hidden -File $scriptPath" -WindowStyle Hidden
+
+# --- Borrar rastro ---
+Remove-Item "C:\Sysmon.zip" -ErrorAction SilentlyContinue
+Remove-Item $xmlPath -ErrorAction SilentlyContinue
+Clear-History
+
+
+# --- Crear usuario para el CRUD (CAMBIAR NOMBRE Y PASSWORD ANTES DE EJECUTAR) ---
+# DE MOMENTO NO EJECUTADO — descomentar cuando se necesite:
+# $passApp = ConvertTo-SecureString "App_Secret_2026_!#" -AsPlainText -Force
+# New-LocalUser -Name "AppService_User" -Password $passApp -Description "Ejecucion de CRUD" -PasswordNeverExpires $true
+# Write-Host "Usuario de aplicacion creado: AppService_User" -ForegroundColor Cyan
+
+
+################################################################################
+#                              PENDIENTES                                      #
+################################################################################
+# Todo: aislar la app en un usuario con menos privilegios
+# Todo: configurar firewall para que solo permita trafico HTTPS (+SSH)
+# Todo: restringir acceso a PowerShell
+# Todo: actualizar Windows Server
+# Todo: deshabilitar IPv6 (verificar si ya esta deshabilitado por defecto)
+# Valorar: desactivar o activar opciones de VirtualBox
+# Todo: sysmon
+# Todo: eliminar adaptador NAT
+# Todo: clear commands
+Desactivar administración remota?
+Borrar script ssh

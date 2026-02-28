@@ -57,8 +57,8 @@ public static class SeedData
             };
 
             // Password hashed by Identity's PBKDF2 implementation
-            // Note: Password must satisfy policy (RequireDigit=true)
-            var result = await userManager.CreateAsync(clienteUser, "Password1");
+            // Strong password with mixed case, digits, and special chars
+            var result = await userManager.CreateAsync(clienteUser, "j{m:3(P?Pv29");
             if (result.Succeeded)
             {
                 await userManager.AddToRoleAsync(clienteUser, "Cliente");
@@ -86,7 +86,7 @@ public static class SeedData
                 CreatedAt = DateTime.UtcNow
             };
 
-            var result2 = await userManager.CreateAsync(adminUser, "Admin123");
+            var result2 = await userManager.CreateAsync(adminUser, "v[9T8B2MQ&;k");
             if (result2.Succeeded)
             {
                 await userManager.AddToRoleAsync(adminUser, "Admin");
