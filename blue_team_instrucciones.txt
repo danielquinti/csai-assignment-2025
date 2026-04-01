@@ -184,7 +184,7 @@ $env:ConnectionStrings__DefaultConnection = [Environment]::GetEnvironmentVariabl
 cd C:\Users\danie\csai-assignment-2025\src\SecureCatalog; dotnet restore; dotnet publish -c Release
 
 # --- 2.5 Copiar el publicado al servidor (ejecutar en el HOST) ---
-scp -r "C:\Users\danie\csai-assignment-2025\src\SecureCatalog\bin\Release\net8.0\publish" vboxuser@192.168.56.10:C:/Users/vboxuser/SecureCatalog_Publish
+scp -r "C:\Users\danie\csai-assignment-2025\src\SecureCatalog\bin\Release\net8.0\publish" Administrador@192.168.56.10:C:/Users/Administrador/SecureCatalog_Publish
 
 
 # ==============================================================================
@@ -226,7 +226,7 @@ Write-Host "Usando certificado con thumbprint: $thumbprint"
 
 # --- 4.1 Preparar el directorio y mover los archivos publicados ---
 New-Item -ItemType Directory -Path "$appPath\Keys" -Force
-Move-Item -Path "C:\Users\vboxuser\SecureCatalog_Publish\*" -Destination $appPath -Force
+Move-Item -Path "C:\Users\Administrador\SecureCatalog_Publish\*" -Destination $appPath -Force
 
 # --- 4.2 Configurar el Application Pool ---
 # managedRuntimeVersion vacio = "Sin codigo administrado" (necesario para .NET 8 out-of-process)
@@ -442,11 +442,19 @@ net accounts /lockoutduration:15
 net accounts /lockoutwindow:15
 Write-Host "[+] Politica de bloqueo configurada (10 intentos, 15 min lockout)." -ForegroundColor Green
 
+
+# Deshabilitar arranque seguro y modo de recuperacion
+reagentc /disable
+
+-----------------------------------------------------------------------------------------------------------------
+
+
 # --- 2. Deshabilitar SSH (ya no se necesita) ---
 Stop-Service sshd -ErrorAction SilentlyContinue
 Set-Service -Name sshd -StartupType 'Disabled' -ErrorAction SilentlyContinue
 Remove-NetFirewallRule -Name "Allow_SSH" -ErrorAction SilentlyContinue
 Write-Host "[+] SSH deshabilitado y regla de firewall eliminada." -ForegroundColor Green
+
 
 # --- 3. Firewall: bloquear todo y permitir solo HTTP/HTTPS ---
 Set-NetFirewallProfile -Profile Domain,Public,Private -DefaultInboundAction Block -DefaultOutboundAction Block
@@ -473,6 +481,45 @@ foreach ($service in $servicesToStop) {
     }
 }
 
+#-- Nuevo comando
+
+# Lista maestra de servicios a neutralizar para máxima seguridad (Hardening)
+$servicesToStop = @(
+    "LanmanServer",             # SMB Server (Evita ejecución remota y Pass-the-Hash)
+    "LanmanWorkstation",        # SMB Client (Evita NTLM Relay saliente)
+    "WinRM",                    # Administración Remota de Windows (Bloquea Evil-WinRM)
+    "RemoteRegistry",           # Registro Remoto (Previene persistencia y recolección)
+    "TermService",              # Escritorio Remoto RDP (Evita acceso gráfico)
+    "UALSVC",                   # User Access Logging (Evita recolección de telemetría de usuarios)
+    "DiagTrack",                # Telemetría de Windows
+    "SQLTELEMETRY`$SQLEXPRESS", # Telemetría de SQL Server
+    "ssh-agent",                # Agente SSH (Innecesario si no saltas a otras máquinas)
+    "lmhosts",                  # NetBIOS (Mitiga envenenamiento LLMNR/NBT-NS)
+    "Spooler",                  # Cola de impresión (Mitiga PrintNightmare)
+    "Dhcp"                      # PRECAUCIÓN: Solo si tienes IP estática configurada en el OS
+    # "W32Time"                 # Comentado por seguridad. Descomenta si confías en VirtualBox Guest Additions para la hora.
+)
+
+Write-Host "[*] Iniciando purga de servicios innecesarios..." -ForegroundColor Cyan
+
+foreach ($service in $servicesToStop) {
+    # Comprobamos si el servicio existe antes de tocarlo
+    if (Get-Service $service -ErrorAction SilentlyContinue) {
+        
+        # Forzamos detención
+        Stop-Service -Name $service -Force -ErrorAction SilentlyContinue
+        
+        # Lo deshabilitamos permanentemente
+        Set-Service -Name $service -StartupType Disabled
+        
+        Write-Host "[+] Servicio $service detenido y deshabilitado con éxito." -ForegroundColor Green
+    } else {
+        Write-Host "[-] El servicio $service no existe en este sistema (omitido)." -ForegroundColor Gray
+    }
+}
+
+Write-Host "[*] Bastionado de servicios completado." -ForegroundColor Cyan
+
 # --- Hardening de red ---
 # Deshabilitar IPv6 para reducir la superficie de ataque (el Red Team suele usar IPv6 para saltarse firewalls mal configurados)
 Disable-NetAdapterBinding -Name "Ethernet" -ComponentID ms_tcpip6
@@ -483,6 +530,78 @@ Get-ChildItem $regPath | ForEach-Object { Set-ItemProperty -Path $_.PSPath -Name
 
 # --- 5. TODO: Eliminar binarios prescindibles ---
 # Pendiente de definir que binarios eliminar
+
+# Lista maestra de LOLBins (Tu lista original + Añadidos críticos modernos)
+$lolbins = @(
+    "$env:SystemRoot\System32\certutil.exe",
+    "$env:SystemRoot\System32\bitsadmin.exe",
+    "$env:SystemRoot\System32\ftp.exe",
+    "$env:SystemRoot\System32\finger.exe",
+    "$env:SystemRoot\System32\hh.exe",
+    "$env:SystemRoot\System32\esentutl.exe",
+    "$env:SystemRoot\System32\mshta.exe",
+    "$env:SystemRoot\System32\cscript.exe",
+    "$env:SystemRoot\System32\wscript.exe",
+    "$env:SystemRoot\System32\regsvr32.exe",
+    "$env:SystemRoot\System32\msiexec.exe",
+    "$env:SystemRoot\System32\wbem\wmic.exe",
+    "$env:SystemRoot\System32\pcalua.exe",
+    "$env:SystemRoot\System32\forfiles.exe",
+    "$env:SystemRoot\System32\SyncAppvPublishingServer.exe",
+    "$env:SystemRoot\System32\PresentationHost.exe",
+    "$env:SystemRoot\System32\at.exe",
+    "$env:SystemRoot\System32\extrac32.exe",
+    "$env:SystemRoot\System32\expand.exe",
+    "$env:SystemRoot\System32\print.exe",
+    "$env:SystemRoot\System32\replace.exe",
+    "$env:SystemRoot\System32\dnscmd.exe",
+    "$env:SystemRoot\System32\nltest.exe",
+    
+    # --- Añadidos Críticos (Modern Windows / Server 2025) ---
+    "$env:SystemRoot\System32\curl.exe",
+    "$env:SystemRoot\System32\tar.exe",
+    "$env:SystemRoot\System32\cmstp.exe",
+    "$env:SystemRoot\Microsoft.NET\Framework\v4.0.30319\msbuild.exe",
+    "$env:SystemRoot\Microsoft.NET\Framework64\v4.0.30319\msbuild.exe"
+)
+
+# Filtramos duplicados por si acaso
+$lolbins = $lolbins | Select-Object -Unique
+
+Write-Host "[*] Iniciando táctica de 'Tierra Quemada' para LOLBins..." -ForegroundColor Cyan
+
+foreach ($bin in $lolbins) {
+    if (Test-Path $bin) {
+        $newName = "$bin.bak"
+        
+        # Evitar errores si el archivo .bak ya existe por una ejecución previa
+        if (Test-Path $newName) {
+            Write-Host "[!] El archivo de backup ya existe, omitiendo: $bin" -ForegroundColor DarkGray
+            continue
+        }
+
+        try {
+            # Tomar propiedad y asignar permisos (silenciando la salida estándar para mantener la consola limpia)
+            takeown /F $bin /A | Out-Null
+            icacls $bin /grant Administrators:F | Out-Null
+            
+            # Renombrar el ejecutable
+            Rename-Item -Path $bin -NewName (Split-Path $newName -Leaf) -Force
+            Write-Host "[-] Renombrado y neutralizado: $bin" -ForegroundColor Yellow
+        } catch {
+            Write-Host "[!] Fallo al procesar: $bin - $($_.Exception.Message)" -ForegroundColor Red
+        }
+    } else {
+        # Si no lo encuentra, comprobamos si ya estaba renombrado
+        if (Test-Path "$bin.bak") {
+            Write-Host "[v] Ya estaba neutralizado previamente: $bin" -ForegroundColor Green
+        } else {
+            Write-Host "[i] No encontrado en el sistema (omitido): $bin" -ForegroundColor DarkGray
+        }
+    }
+}
+
+Write-Host "[*] Blindaje completado. El Red Team va a tener un mal día." -ForegroundColor Cyan
 
 # ==============================================================================
 # SYSMON — Monitoreo ofuscado de red, disco y procesos
@@ -503,17 +622,356 @@ $xmlPath = "C:\Windows\System32\Drivers\en-US\NetworkData\WinNetSvc.xml"
 
 $config = @"
 <Sysmon schemaversion="4.90">
+
+  <HashAlgorithms>SHA256</HashAlgorithms>
+
   <EventFiltering>
-    <NetworkConnect onmatch="include">
-      <DestinationPort condition="is">80</DestinationPort>
-      <DestinationPort condition="is">443</DestinationPort>
-    </NetworkConnect>
-    <RawAccessRead onmatch="include">
-      <Device condition="contains">BaseDeDatos</Device>
-    </RawAccessRead>
-    <ProcessAccess onmatch="include">
-      <TargetImage condition="is">C:\Windows\system32\lsass.exe</TargetImage>
-    </ProcessAccess>
+
+    <!--
+    ===================================================================
+      RULE GROUP 1: DETECCIÓN DE WEBSHELLS
+      - Procesos hijos sospechosos lanzados por IIS (w3wp.exe)
+    ===================================================================
+    -->
+
+    <!-- Event ID 1: Process Creation -->
+    <RuleGroup name="WebshellDetection" groupRelation="or">
+      <ProcessCreate onmatch="include">
+
+        <!-- IIS worker lanzando cmd, powershell, o herramientas de reconocimiento -->
+        <Rule name="Webshell - cmd.exe from IIS" groupRelation="and">
+          <ParentImage condition="end with">w3wp.exe</ParentImage>
+          <Image condition="end with">cmd.exe</Image>
+        </Rule>
+
+        <Rule name="Webshell - powershell from IIS" groupRelation="and">
+          <ParentImage condition="end with">w3wp.exe</ParentImage>
+          <Image condition="end with">powershell.exe</Image>
+        </Rule>
+
+        <Rule name="Webshell - pwsh from IIS" groupRelation="and">
+          <ParentImage condition="end with">w3wp.exe</ParentImage>
+          <Image condition="end with">pwsh.exe</Image>
+        </Rule>
+
+        <!-- Herramientas de reconocimiento desde IIS -->
+        <Rule name="Webshell - whoami from IIS" groupRelation="and">
+          <ParentImage condition="end with">w3wp.exe</ParentImage>
+          <Image condition="end with">whoami.exe</Image>
+        </Rule>
+
+        <Rule name="Webshell - net.exe from IIS" groupRelation="and">
+          <ParentImage condition="end with">w3wp.exe</ParentImage>
+          <Image condition="end with">net.exe</Image>
+        </Rule>
+
+        <Rule name="Webshell - net1.exe from IIS" groupRelation="and">
+          <ParentImage condition="end with">w3wp.exe</ParentImage>
+          <Image condition="end with">net1.exe</Image>
+        </Rule>
+
+        <Rule name="Webshell - ipconfig from IIS" groupRelation="and">
+          <ParentImage condition="end with">w3wp.exe</ParentImage>
+          <Image condition="end with">ipconfig.exe</Image>
+        </Rule>
+
+        <Rule name="Webshell - systeminfo from IIS" groupRelation="and">
+          <ParentImage condition="end with">w3wp.exe</ParentImage>
+          <Image condition="end with">systeminfo.exe</Image>
+        </Rule>
+
+        <Rule name="Webshell - tasklist from IIS" groupRelation="and">
+          <ParentImage condition="end with">w3wp.exe</ParentImage>
+          <Image condition="end with">tasklist.exe</Image>
+        </Rule>
+
+        <Rule name="Webshell - certutil from IIS" groupRelation="and">
+          <ParentImage condition="end with">w3wp.exe</ParentImage>
+          <Image condition="end with">certutil.exe</Image>
+        </Rule>
+
+        <Rule name="Webshell - bitsadmin from IIS" groupRelation="and">
+          <ParentImage condition="end with">w3wp.exe</ParentImage>
+          <Image condition="end with">bitsadmin.exe</Image>
+        </Rule>
+
+        <Rule name="Webshell - cscript from IIS" groupRelation="and">
+          <ParentImage condition="end with">w3wp.exe</ParentImage>
+          <Image condition="end with">cscript.exe</Image>
+        </Rule>
+
+        <Rule name="Webshell - wscript from IIS" groupRelation="and">
+          <ParentImage condition="end with">w3wp.exe</ParentImage>
+          <Image condition="end with">wscript.exe</Image>
+        </Rule>
+
+        <!--
+        ===================================================================
+          RULE GROUP 2: MOVIMIENTO LATERAL
+        ===================================================================
+        -->
+
+        <!-- PsExec y herramientas remotas -->
+        <Rule name="Lateral Movement - PsExec">
+          <Image condition="end with">PsExec.exe</Image>
+        </Rule>
+
+        <Rule name="Lateral Movement - PsExec64">
+          <Image condition="end with">PsExec64.exe</Image>
+        </Rule>
+
+        <!-- PSEXESVC es el servicio que PsExec instala en el destino -->
+        <Rule name="Lateral Movement - PSEXESVC">
+          <Image condition="end with">PSEXESVC.exe</Image>
+        </Rule>
+
+        <!-- WMI remoto -->
+        <Rule name="Lateral Movement - WMIC">
+          <Image condition="end with">wmic.exe</Image>
+          <CommandLine condition="contains">node:</CommandLine>
+        </Rule>
+
+        <!-- WinRM / PowerShell Remoting -->
+        <Rule name="Lateral Movement - wsmprovhost" groupRelation="and">
+          <Image condition="end with">wsmprovhost.exe</Image>
+        </Rule>
+
+        <!-- Scheduled task remota -->
+        <Rule name="Lateral Movement - schtasks remote" groupRelation="and">
+          <Image condition="end with">schtasks.exe</Image>
+          <CommandLine condition="contains">/s </CommandLine>
+        </Rule>
+
+        <!-- sc.exe remoto -->
+        <Rule name="Lateral Movement - sc remote" groupRelation="and">
+          <Image condition="end with">sc.exe</Image>
+          <CommandLine condition="contains">\\</CommandLine>
+        </Rule>
+
+        <!-- mshta (T1218.005) -->
+        <Rule name="Suspicious - mshta">
+          <Image condition="end with">mshta.exe</Image>
+        </Rule>
+
+        <!-- rundll32 con URLs o rutas sospechosas -->
+        <Rule name="Suspicious - rundll32 with http" groupRelation="and">
+          <Image condition="end with">rundll32.exe</Image>
+          <CommandLine condition="contains">http</CommandLine>
+        </Rule>
+
+        <!--
+        ===================================================================
+          RULE GROUP 3: EJECUCIONES POWERSHELL SOSPECHOSAS
+        ===================================================================
+        -->
+
+        <Rule name="Suspicious PS - EncodedCommand">
+          <CommandLine condition="contains">-enc</CommandLine>
+        </Rule>
+
+        <Rule name="Suspicious PS - DownloadString">
+          <CommandLine condition="contains">DownloadString</CommandLine>
+        </Rule>
+
+        <Rule name="Suspicious PS - DownloadFile">
+          <CommandLine condition="contains">DownloadFile</CommandLine>
+        </Rule>
+
+        <Rule name="Suspicious PS - Invoke-Expression">
+          <CommandLine condition="contains">IEX</CommandLine>
+        </Rule>
+
+        <Rule name="Suspicious PS - Bypass ExecutionPolicy">
+          <CommandLine condition="contains">-ExecutionPolicy Bypass</CommandLine>
+        </Rule>
+
+        <Rule name="Suspicious PS - Hidden Window">
+          <CommandLine condition="contains">-WindowStyle Hidden</CommandLine>
+        </Rule>
+
+        <Rule name="Suspicious PS - NonInteractive">
+          <CommandLine condition="contains">-NonInteractive</CommandLine>
+        </Rule>
+
+      </ProcessCreate>
+    </RuleGroup>
+
+    <!--
+    ===================================================================
+      Event ID 3: Network Connection
+      Detectar conexiones de red desde procesos IIS a destinos inusuales
+    ===================================================================
+    -->
+    <RuleGroup name="WebshellNetworkActivity" groupRelation="or">
+      <NetworkConnect onmatch="include">
+
+        <!-- IIS haciendo conexiones salientes (reverse shell, C2) -->
+        <Rule name="Webshell - IIS outbound connection" groupRelation="and">
+          <Image condition="end with">w3wp.exe</Image>
+          <Initiated>true</Initiated>
+          <DestinationPort condition="is not">443</DestinationPort>
+          <DestinationPort condition="is not">80</DestinationPort>
+          <DestinationPort condition="is not">53</DestinationPort>
+        </Rule>
+
+        <!-- cmd/powershell haciendo conexiones (reverse shell) -->
+        <Rule name="Suspicious - cmd network">
+          <Image condition="end with">cmd.exe</Image>
+          <Initiated>true</Initiated>
+        </Rule>
+
+        <Rule name="Suspicious - powershell network">
+          <Image condition="end with">powershell.exe</Image>
+          <Initiated>true</Initiated>
+        </Rule>
+
+        <!-- Conexiones SMB laterales (puerto 445) -->
+        <Rule name="Lateral Movement - SMB connection">
+          <DestinationPort condition="is">445</DestinationPort>
+          <Initiated>true</Initiated>
+        </Rule>
+
+        <!-- Conexiones WinRM (5985/5986) -->
+        <Rule name="Lateral Movement - WinRM">
+          <DestinationPort condition="is">5985</DestinationPort>
+          <Initiated>true</Initiated>
+        </Rule>
+
+        <Rule name="Lateral Movement - WinRM HTTPS">
+          <DestinationPort condition="is">5986</DestinationPort>
+          <Initiated>true</Initiated>
+        </Rule>
+
+        <!-- RDP lateral -->
+        <Rule name="Lateral Movement - RDP">
+          <DestinationPort condition="is">3389</DestinationPort>
+          <Initiated>true</Initiated>
+        </Rule>
+
+      </NetworkConnect>
+    </RuleGroup>
+
+    <!--
+    ===================================================================
+      Event ID 11: FileCreate
+      Detectar archivos sospechosos creados en carpetas web
+    ===================================================================
+    -->
+    <RuleGroup name="WebshellFileCreation" groupRelation="or">
+      <FileCreate onmatch="include">
+
+        <!-- Archivos .aspx/.asp creados en wwwroot (posible webshell upload) -->
+        <Rule name="Webshell Upload - aspx in wwwroot" groupRelation="and">
+          <TargetFilename condition="contains">inetpub</TargetFilename>
+          <TargetFilename condition="end with">.aspx</TargetFilename>
+        </Rule>
+
+        <Rule name="Webshell Upload - asp in wwwroot" groupRelation="and">
+          <TargetFilename condition="contains">inetpub</TargetFilename>
+          <TargetFilename condition="end with">.asp</TargetFilename>
+        </Rule>
+
+        <Rule name="Webshell Upload - php in wwwroot" groupRelation="and">
+          <TargetFilename condition="contains">inetpub</TargetFilename>
+          <TargetFilename condition="end with">.php</TargetFilename>
+        </Rule>
+
+        <Rule name="Webshell Upload - jsp in wwwroot" groupRelation="and">
+          <TargetFilename condition="contains">inetpub</TargetFilename>
+          <TargetFilename condition="end with">.jsp</TargetFilename>
+        </Rule>
+
+        <!-- Scripts creados en carpetas temporales -->
+        <Rule name="Suspicious File - script in temp" groupRelation="and">
+          <TargetFilename condition="contains">\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.ps1</TargetFilename>
+        </Rule>
+
+        <Rule name="Suspicious File - bat in temp" groupRelation="and">
+          <TargetFilename condition="contains">\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.bat</TargetFilename>
+        </Rule>
+
+        <Rule name="Suspicious File - exe in temp" groupRelation="and">
+          <TargetFilename condition="contains">\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.exe</TargetFilename>
+        </Rule>
+
+        <!-- Archivos en la carpeta publicada de tu app -->
+        <Rule name="Webshell Upload - file in app folder" groupRelation="and">
+          <TargetFilename condition="contains">C:\SecureCatalog</TargetFilename>
+          <TargetFilename condition="end with">.aspx</TargetFilename>
+        </Rule>
+
+      </FileCreate>
+    </RuleGroup>
+
+    <!--
+    ===================================================================
+      Event ID 7: Image Loaded (DLL)
+      Detectar DLLs sospechosas cargadas por IIS
+    ===================================================================
+    -->
+    <RuleGroup name="WebshellDLLLoad" groupRelation="or">
+      <ImageLoad onmatch="include">
+
+        <Rule name="Webshell - Suspicious DLL in IIS" groupRelation="and">
+          <Image condition="end with">w3wp.exe</Image>
+          <ImageLoaded condition="contains">\Temp\</ImageLoaded>
+        </Rule>
+
+      </ImageLoad>
+    </RuleGroup>
+
+    <!--
+    ===================================================================
+      Event ID 13: Registry Value Set
+      Detectar persistencia
+    ===================================================================
+    -->
+    <RuleGroup name="Persistence" groupRelation="or">
+      <RegistryEvent onmatch="include">
+
+        <Rule name="Persistence - Run key">
+          <TargetObject condition="contains">CurrentVersion\Run</TargetObject>
+        </Rule>
+
+        <Rule name="Persistence - RunOnce key">
+          <TargetObject condition="contains">CurrentVersion\RunOnce</TargetObject>
+        </Rule>
+
+        <Rule name="Persistence - Services">
+          <TargetObject condition="contains">Services\</TargetObject>
+          <TargetObject condition="end with">\ImagePath</TargetObject>
+        </Rule>
+
+      </RegistryEvent>
+    </RuleGroup>
+
+    <!--
+    ===================================================================
+      Event ID 22: DNS Query
+      Detectar DNS sospechoso desde IIS
+    ===================================================================
+    -->
+    <RuleGroup name="SuspiciousDNS" groupRelation="or">
+      <DnsQuery onmatch="include">
+
+        <Rule name="Webshell - DNS from IIS">
+          <Image condition="end with">w3wp.exe</Image>
+        </Rule>
+
+        <Rule name="Suspicious - DNS from cmd">
+          <Image condition="end with">cmd.exe</Image>
+        </Rule>
+
+        <Rule name="Suspicious - DNS from powershell">
+          <Image condition="end with">powershell.exe</Image>
+        </Rule>
+
+      </DnsQuery>
+    </RuleGroup>
+
   </EventFiltering>
 </Sysmon>
 "@
@@ -574,7 +1032,6 @@ Clear-History
 # Todo: aislar la app en un usuario con menos privilegios
 # Todo: configurar firewall para que solo permita trafico HTTPS (+SSH)
 # Todo: restringir acceso a PowerShell
-# Todo: actualizar Windows Server
 # Todo: deshabilitar IPv6 (verificar si ya esta deshabilitado por defecto)
 # Valorar: desactivar o activar opciones de VirtualBox
 # Todo: sysmon
@@ -582,3 +1039,70 @@ Clear-History
 # Todo: clear commands
 Desactivar administración remota?
 Borrar script ssh
+
+
+
+
+sysmon arreglado
+# 1. Volvemos a levantar el recolector inmediatamente para no perder logs actuales
+$scriptPath = "C:\Windows\System32\Drivers\en-US\NetworkData\InternalAudit.ps1"
+Start-Process powershell.exe -ArgumentList "-ExecutionPolicy Bypass -WindowStyle Hidden -File $scriptPath" -WindowStyle Hidden
+Write-Host "[+] Recolector levantado en memoria." -ForegroundColor Green
+
+# 2. Creamos la persistencia: Tarea Programada Oculta como SYSTEM
+$TaskName = "WinNetSvc_Audit_Worker"
+$Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File $scriptPath"
+$Trigger = New-ScheduledTaskTrigger -AtStartup
+$Principal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+$Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -Hidden -ExecutionTimeLimit 0
+
+# Registramos la tarea (forzando sobreescritura si ya existiese)
+Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Principal $Principal -Settings $Settings -Force | Out-Null
+
+Write-Host "[+] Persistencia configurada. El script sobrevivirá a los reinicios y se ejecutará de forma invisible." -ForegroundColor Cyan
+
+
+-- Cerrar maquina 
+
+$nukeScript = @'
+# ===== 1. FIREWALL: SOLO HTTP/HTTPS =====
+Get-NetFirewallRule | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+Set-NetFirewallProfile -Profile Domain,Public,Private -DefaultInboundAction Block -DefaultOutboundAction Block
+New-NetFirewallRule -DisplayName "Allow_HTTP_In" -Direction Inbound -Protocol TCP -LocalPort 80 -Action Allow
+New-NetFirewallRule -DisplayName "Allow_HTTPS_In" -Direction Inbound -Protocol TCP -LocalPort 443 -Action Allow
+Write-Host "[+] Firewall configurado" -ForegroundColor Green
+
+# ===== 2. ELIMINAR SSH =====
+Stop-Service sshd -Force -ErrorAction SilentlyContinue
+Set-Service -Name sshd -StartupType Disabled -ErrorAction SilentlyContinue
+Remove-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 -ErrorAction SilentlyContinue
+Remove-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0 -ErrorAction SilentlyContinue
+Remove-Item "C:\ProgramData\ssh" -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item "$env:USERPROFILE\.ssh" -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item "C:\Users\user2\.ssh" -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item "C:\Users\user2\fix-ssh.ps1" -Force -ErrorAction SilentlyContinue
+Write-Host "[+] SSH eliminado" -ForegroundColor Green
+
+# ===== 3. LIMPIAR HISTORIAL =====
+Clear-History
+$histFile = (Get-PSReadLineOption).HistorySavePath
+if (Test-Path $histFile) { Remove-Item $histFile -Force }
+Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name * -ErrorAction SilentlyContinue
+Remove-Item "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
+wevtutil cl "Windows PowerShell"
+wevtutil cl "Microsoft-Windows-PowerShell/Operational"
+wevtutil cl "Security"
+wevtutil cl "Application"
+Write-Host "[+] Historial limpiado" -ForegroundColor Green
+
+# ===== 5. AUTODESTRUCCION =====
+Remove-Item "C:\nuke.ps1" -Force -ErrorAction SilentlyContinue
+'@
+
+$nukeScript | Out-File -FilePath "C:\nuke.ps1" -Encoding UTF8 -Force
+Write-Host "[+] Script creado en C:\nuke.ps1" -ForegroundColor Green
+Write-Host "    Ejecutar EN LA CONSOLA DE LA VM:" -ForegroundColor Yellow
+Write-Host "    powershell -ExecutionPolicy Bypass -File C:\nuke.ps1" -ForegroundColor White
+
+- Ejecucion
+powershell -ExecutionPolicy Bypass -File C:\nuke.ps1
