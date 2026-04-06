@@ -525,17 +525,69 @@ Command executed to probe the API from an external origin:
 ```bash
 curl -I -k -X OPTIONS https://192.168.56.137/backend/api/users -H "Origin: https://evil.com"
 ```
+**Result:**
+```http
+HTTP/2 405 
+cache-control: no-store, no-cache, must-revalidate, proxy-revalidate
+pragma: no-cache
+allow: GET, POST
+expires: 0
+x-frame-options: DENY
+x-content-type-options: nosniff
+x-xss-protection: 0
+content-security-policy: default-src 'self'; connect-src 'self' https://192.168.56.137; script-src 'self'; style-src 'self'; img-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'self';
+strict-transport-security: max-age=3153600; includeSubDomains
+referrer-policy: strict-origin-when-cross-origin
+permissions-policy: camera=(), microphone=(), geolocation=(), payment=()
+cross-origin-opener-policy: same-origin
+cross-origin-resource-policy: same-origin
+cross-origin-embedder-policy: require-corp
+x-permitted-cross-domain-policies: none
+date: Mon, 06 Apr 2026 18:02:13 GMT
+```
 **Observation:** The backend returned a `405 Method Not Allowed` for `OPTIONS` requests and omitted the `Access-Control-Allow-Origin` header altogether. Furthermore, the presence of strict isolation headers (`cross-origin-resource-policy: same-origin`, `cross-origin-opener-policy: same-origin`) heavily restricts cross-origin interactions.
 
 **2. Cross-Site Scripting (XSS)**
-Command executed to attempt arbitrary script injection via JSON payloads and URL paths:
+Command executed to attempt arbitrary script injection via URL paths (to test HTTP.sys):
+```bash
+curl -k -X GET "https://192.168.56.137/backend/api/users/1<script>alert(1)</script>" -I
+```
+**Result:**
+```text
+HTTP/1.1 400 Bad Request
+Content-Type: text/html; charset=us-ascii
+Server: Microsoft-HTTPAPI/2.0
+Date: Mon, 06 Apr 2026 18:02:21 GMT
+Connection: close
+Content-Length: 326
+```
+
+Command executed to attempt arbitrary script injection via JSON payloads:
 ```bash
 curl -k -X POST https://192.168.56.137/backend/api/auth/login -H "Content-Type: application/json" -d '{"username":"<script>alert(1)</script>", "password":"123"}'
+```
+**Result:**
+```json
+{"type":"https://tools.ietf.org/html/rfc9110#section-15.5.1","title":"One or more validation errors occurred.","status":400,"errors":{"Password":["La contraseña debe tener al menos 8 caracteres."]},"traceId":"00-7320371a5e44f241762ec10ab27f0ddb-e5281f9946b7d6e6-00"}
 ```
 **Observation:** Reflected XSS attempts in URL paths stringently hit a primary filter at the IIS HTTP.sys layer (`HTTP 400 Bad Request - Invalid URL`). JSON injections are not echoed directly back as HTML and the response content-type is securely set to `application/json` or `application/problem+json`, rendering any reflected script inert inside modern browsers.
 
 **3. Cross-Site Request Forgery (CSRF)**
-**Observation:** The application delegates authentication management strictly to JWT Bearer tokens injected via JavaScript from `localStorage`. No ambient session cookies are utilized for backend tracking. Since modern browsers do not artificially append arbitrary HTTP headers or LocalStorage keys to cross-domain requests as they do with cookies, traditional CSRF attacks are fundamentally broken against this framework architecture.
+Command executed simulating a forged Cross-Origin request without ambient tokens (mimicking a hijacked HTML form submission):
+```bash
+curl -k -i -X PUT https://192.168.56.137/backend/api/users/2 -H "Origin: https://evil.com" -H "Content-Type: application/json" -d '{"email":"hacked@evil.com"}'
+```
+**Result:**
+```http
+HTTP/2 401 
+cache-control: no-store, no-cache, must-revalidate, proxy-revalidate
+www-authenticate: Bearer
+x-frame-options: DENY
+x-content-type-options: nosniff
+x-xss-protection: 0
+content-security-policy: default-src 'self'; connect-src 'self' https://192.168.56.137; script-src 'self'; style-src 'self'; img-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'self';
+```
+**Observation:** The application delegates authentication management strictly to JWT Bearer tokens injected via JavaScript from `localStorage`. No ambient session cookies are utilized for backend tracking. Because Cross-Origin browser behaviors do not automatically attach Bearer tokens, the CSRF payload immediately drops with an `HTTP 401 Unauthorized` response. Traditional CSRF attacks are fundamentally broken against this framework architecture.
 
 **Conclusion:** The configuration heavily mitigates the common client-side trifecta (XSS, CSRF, CORS weaknesses) through systemic API design choices and strict proxy security headers.
 
