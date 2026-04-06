@@ -79,6 +79,21 @@ sqlmap -u "https://192.168.56.137/backend/api/users/1" \
        --batch --dbms mssql --level 3 --risk 2
 ```
 
+### 5. Verify Client-Side Vulnerabilities (XSS, CSRF, CORS)
+Test Cross-Origin Resource Sharing protections and Cross-Site Scripting filters. CSRF is inherently mitigated via `localStorage` Bearer tokens.
+```bash
+# Check CORS configurations for external origins
+curl -I -k -X OPTIONS https://192.168.56.137/backend/api/users -H "Origin: https://evil.com"
+
+# Check URL-path XSS filter (Blocked by IIS HTTP.sys)
+curl -k -X GET "https://192.168.56.137/backend/api/users/1<script>alert(1)</script>" -I
+
+# Check JSON-payload XSS filter
+curl -k -X POST https://192.168.56.137/backend/api/auth/login \
+     -H "Content-Type: application/json" \
+     -d '{"username":"<script>alert(1)</script>", "password":"123"}'
+```
+
 ---
 
 ## Phase 3: Hardware Exploitation & Memory Dumping (Windows Host)

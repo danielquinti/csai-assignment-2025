@@ -516,6 +516,29 @@ We tested the identified vertical privilege escalation vector by attempting to p
 ```
 **Conclusion:** The backend correctly ignores the `role` field when processed by a non-administrative token, or strictly validates the transition. No vertical privilege escalation via direct JSON manipulation was achieved.
 
+### 4.8 Client-Side Vulnerability Analysis (XSS, CSRF, CORS)
+
+**Objective:** Investigate the susceptibility of the application to cross-site scripting, request forgery, and origin resource sharing misconfigurations.
+
+**1. Cross-Origin Resource Sharing (CORS)**
+Command executed to probe the API from an external origin:
+```bash
+curl -I -k -X OPTIONS https://192.168.56.137/backend/api/users -H "Origin: https://evil.com"
+```
+**Observation:** The backend returned a `405 Method Not Allowed` for `OPTIONS` requests and omitted the `Access-Control-Allow-Origin` header altogether. Furthermore, the presence of strict isolation headers (`cross-origin-resource-policy: same-origin`, `cross-origin-opener-policy: same-origin`) heavily restricts cross-origin interactions.
+
+**2. Cross-Site Scripting (XSS)**
+Command executed to attempt arbitrary script injection via JSON payloads and URL paths:
+```bash
+curl -k -X POST https://192.168.56.137/backend/api/auth/login -H "Content-Type: application/json" -d '{"username":"<script>alert(1)</script>", "password":"123"}'
+```
+**Observation:** Reflected XSS attempts in URL paths stringently hit a primary filter at the IIS HTTP.sys layer (`HTTP 400 Bad Request - Invalid URL`). JSON injections are not echoed directly back as HTML and the response content-type is securely set to `application/json` or `application/problem+json`, rendering any reflected script inert inside modern browsers.
+
+**3. Cross-Site Request Forgery (CSRF)**
+**Observation:** The application delegates authentication management strictly to JWT Bearer tokens injected via JavaScript from `localStorage`. No ambient session cookies are utilized for backend tracking. Since modern browsers do not artificially append arbitrary HTTP headers or LocalStorage keys to cross-domain requests as they do with cookies, traditional CSRF attacks are fundamentally broken against this framework architecture.
+
+**Conclusion:** The configuration heavily mitigates the common client-side trifecta (XSS, CSRF, CORS weaknesses) through systemic API design choices and strict proxy security headers.
+
 ---
 
 ## 5. Exploit Chain: JWT Forging via Memory Analysis
