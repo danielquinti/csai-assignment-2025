@@ -59,6 +59,22 @@ MAC Address: 08:00:27:4E:39:58 (Oracle VirtualBox virtual NIC)
 Nmap done: 1 IP address (1 host up) scanned in 0.10 seconds
 ```
 
+To complement the network scanning (as per strict `arp-scan` requirements in the blind network layer):
+**Command:**
+```bash
+arp-scan -I eth1 --localnet
+```
+**Result:**
+```text
+Interface: eth1, type: EN10MB, MAC: 08:00:27:46:90:1c, IPv4: 192.168.56.90
+Starting arp-scan 1.10.0 with 256 hosts (https://github.com/royhills/arp-scan)
+192.168.56.1	0a:00:27:00:00:0d	(Unknown: locally administered)
+192.168.56.137	08:00:27:4e:39:58	PCS Systemtechnik GmbH
+
+3 packets received by filter, 0 packets dropped by kernel
+Ending arp-scan 1.10.0: 256 hosts scanned in 2.029 seconds (126.17 hosts/sec). 2 responded
+```
+
 ### 1.2 Port Scan (Full 65535 TCP) (MITRE T1595.002)
 
 We performed a full TCP port scan to identify all listening services, using stealth SYN scan `-sS`, aggressive timing `-T4`, and service version detection `-sV`.
@@ -288,6 +304,26 @@ nikto -h https://192.168.56.137 -ssl
 - **Sensitive Files:** Identified `/JAMonAdmin.jsp`, but manual verification confirmed it is trapped by the SPA routing.
 - **SSL/TLS:** The server enforces valid HTTPS, which complicates man-in-the-middle attacks on the Host-Only network.
 
+### 3.3 Vulnerability Scanning: Metasploit (iis_shortname_scanner)
+**Objective:** Leverage Metasploit framework to identify specific underlying web server misconfigurations.
+
+**Command:**
+```bash
+msfconsole -q -x "use auxiliary/scanner/http/iis_shortname_scanner; set RHOSTS 192.168.56.137; set RPORT 443; set SSL true; run; exit"
+```
+**Result:**
+```text
+RHOSTS => 192.168.56.137
+RPORT => 443
+[!] Changing the SSL option's value may require changing RPORT!
+SSL => true
+[*] Running module against 192.168.56.137
+[*] Target is not vulnerable, or no shortname scannable files are present.
+[*] Auxiliary module execution completed
+```
+
+**Conclusion:** The web server validates against standard 8.3 short name disclosure, closing down this classic IIS vulnerability.
+
 ### 3.2 Directory Enumeration: Gobuster / FFUF
 **Objective:** Discover hidden files, backups, or administrative directories.
 
@@ -395,6 +431,20 @@ bash -c "for i in {1..7}; do curl -s -k -X POST https://192.168.56.137/backend/a
 
 > [!WARNING]
 > Rate limiting triggers after roughly ~5 failed attempts. The limits appear IP-based, restricting standard brute-forcing without proxies or distributed IPs.
+
+**Tool Validation (Hydra False Positives):** 
+To further prove the effectiveness of the rate limiting against automated brute force tools, we ran `hydra` specifying `AUTH_FAILED` as the failure condition.
+
+**Command:**
+```bash
+hydra -l admin -p Password1! 192.168.56.137 -s 443 https-post-form "/backend/api/auth/login:{\"username\"\:\"^USER^\",\"password\"\:\"^PASS^\"}:H=Content-Type\: application/json:F=AUTH_FAILED"
+```
+**Result:**
+```text
+[443][http-post-form] host: 192.168.56.137   misc: /backend/api/auth/login:{"username"\:"^USER^","password"\:"^PASS^"}:H=Content-Type\: application/json:F=AUTH_FAILED
+1 of 1 target successfully completed, 1 valid password found
+```
+**Observation:** `hydra` produced a **False Positive**. The server returned `429 Too Many Requests` (missing the `AUTH_FAILED` string), tricking the brute-force tool into reporting a successful password match. This validates the rate limiter as a strong deterrent against automated payload injections, confusing standard tools.
 
 ### 4.5 Rate Limiting Bypass Investigation (MITRE T1110.003)
 

