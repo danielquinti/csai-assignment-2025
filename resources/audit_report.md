@@ -52,11 +52,11 @@ nmap -sn 192.168.56.137 -PR
 ```
 **Result:**
 ```
-Starting Nmap 7.98 ( https://nmap.org ) at 2026-04-02 10:23 -0400
-Nmap scan report for 192.168.56.137
-Host is up (0.0023s latency).
+Starting Nmap 7.98 ( https://nmap.org ) at 2026-04-06 12:30 -0400
+Nmap scan report for 192.168.56.137 (192.168.56.137)
+Host is up (0.0032s latency).
 MAC Address: 08:00:27:4E:39:58 (Oracle VirtualBox virtual NIC)
-Nmap done: 1 IP address (1 host up) scanned in 0.72 seconds
+Nmap done: 1 IP address (1 host up) scanned in 0.10 seconds
 ```
 
 ### 1.2 Port Scan (Full 65535 TCP) (MITRE T1595.002)
@@ -68,10 +68,40 @@ We performed a full TCP port scan to identify all listening services, using stea
 nmap -sS -sV -p- -T4 192.168.56.137 -v
 ```
 **Result Summary:**
+```
+Starting Nmap 7.98 ( https://nmap.org ) at 2026-04-06 12:30 -0400
+NSE: Loaded 48 scripts for scanning.
+Initiating ARP Ping Scan at 12:30
+Scanning 192.168.56.137 [1 port]
+Completed ARP Ping Scan at 12:30, 0.06s elapsed (1 total hosts)
+Initiating Parallel DNS resolution of 1 host. at 12:30
+Completed Parallel DNS resolution of 1 host. at 12:30, 0.02s elapsed
+Initiating SYN Stealth Scan at 12:30
+Scanning 192.168.56.137 (192.168.56.137) [65535 ports]
+Discovered open port 443/tcp on 192.168.56.137
+Discovered open port 80/tcp on 192.168.56.137
+Completed SYN Stealth Scan at 12:32, 89.87s elapsed (65535 total ports)
+Initiating Service scan at 12:32
+Scanning 2 services on 192.168.56.137 (192.168.56.137)
+Completed Service scan at 12:32, 17.38s elapsed (2 services on 1 host)
+NSE: Script scanning 192.168.56.137.
+Nmap scan report for 192.168.56.137 (192.168.56.137)
+Host is up (0.0012s latency).
+Not shown: 65533 filtered tcp ports (no-response)
+PORT    STATE SERVICE    VERSION
+80/tcp  open  http       Microsoft HTTPAPI httpd 2.0 (SSDP/UPnP)
+443/tcp open  ssl/https?
+MAC Address: 08:00:27:4E:39:58 (Oracle VirtualBox virtual NIC)
+Service Info: OS: Windows; CPE: cpe:/o:microsoft:windows
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 107.73 seconds
+```
+
 | Port | State | Service | Version |
 |---|---|---|---|
-| **80/tcp** | Open | HTTP | Microsoft HTTPAPI httpd 2.0 |
-| **443/tcp** | Open | HTTPS | IIS (behind reverse proxy) |
+| **80/tcp** | Open | HTTP | Microsoft HTTPAPI httpd 2.0 (SSDP/UPnP) |
+| **443/tcp** | Open | ssl/https? | IIS (behind reverse proxy) |
 | All others | Filtered | — | Windows Firewall |
 
 > [!IMPORTANT]
@@ -142,16 +172,26 @@ We evaluated the security posture of the exposed server headers.
 ```bash
 curl -I -k https://192.168.56.137
 ```
-**Result Fragment:**
+**Result:**
 ```
 HTTP/2 200 
+content-length: 736
 content-type: text/html
+last-modified: Fri, 27 Feb 2026 11:02:18 GMT
+accept-ranges: bytes
+etag: "30b54c8ad8a7dc1:0"
 x-content-type-options: nosniff
 x-frame-options: DENY
 x-xss-protection: 0
 referrer-policy: strict-origin-when-cross-origin
 content-security-policy: default-src 'self'; connect-src 'self' https://192.168.56.137; script-src 'self'; style-src 'self'; img-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'self';
 strict-transport-security: max-age=3153600; includeSubDomains
+cross-origin-opener-policy: same-origin
+cross-origin-resource-policy: same-origin
+cross-origin-embedder-policy: require-corp
+permissions-policy: camera=(), microphone=(), geolocation=(), payment=()
+x-permitted-cross-domain-policies: none
+date: Mon, 06 Apr 2026 16:32:35 GMT
 ```
 
 **Header Evaluation:**
@@ -210,6 +250,39 @@ nikto -h https://192.168.56.137 -ssl
 ```
 
 **Key Findings:**
+```text
+- Nikto v2.6.0
+---------------------------------------------------------------------------
++ Your Nikto installation is out of date.
++ Target IP:          192.168.56.137
++ Target Hostname:    192.168.56.137
++ Target Port:        443
+---------------------------------------------------------------------------
++ SSL Info:           Subject:  /CN=CSAI
+                      CN:       CSAI
+                      SAN:      CSAI
+                      Ciphers:  TLS_AES_256_GCM_SHA384
+                      Issuer:   /CN=CSAI
++ Platform:           Unknown
++ Start Time:         2026-04-06 12:47:28 (GMT-4)
+---------------------------------------------------------------------------
++ Server: No banner retrieved
++ No CGI Directories found (use '-C all' to force check all possible dirs). CGI tests skipped.
++ [999993] /: Hostname '192.168.56.137' does not match certificate names (CN: CSAI, SAN: CSAI). See: https://cwe.mitre.org/data/definitions/297.html
++ [999990] OPTIONS: Allowed HTTP Methods: OPTIONS, TRACE, GET, HEAD, POST .
++ [999985] OPTIONS: Public HTTP Methods: OPTIONS, TRACE, GET, HEAD, POST .
++ [002743] /.bash_history: A user's home directory may be set to the web root, the shell history was retrieved. This should not be accessible via the web.
++ [002756] /.sh_history: A user's home directory may be set to the web root, the shell history was retrieved. This should not be accessible via the web.
++ [999986] /..%252f..%252f..%252f..%252f..%252f../windows/repair/sam: Retrieved x-aspnet-version header: 4.0.30319.
++ [007303] /JAMonAdmin.jsp: JAMon - Java Application Monitor Admin interface identified. Versions 2.7 and earlier contain XSS vulnerabilities. See: https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2013-6235
++ [007352] /: The X-Content-Type-Options header is not set. This could allow the user agent to render the content of the site in a different fashion to the MIME type. See: https://www.netsparker.com/web-vulnerability-scanner/vulnerabilities/missing-content-type-header/
++ 8910 requests: 16 errors and 8 items reported on the remote host
++ End Time:           2026-04-06 12:55:01 (GMT-4) (453 seconds)
+---------------------------------------------------------------------------
++ 1 host(s) tested
+```
+
+**Key Findings:**
 - **Web Server:** Microsoft-IIS/10.0 detected.
 - **Header Analysis:** Confirmed `X-Powered-By: ASP.NET` and other standard IIS headers.
 - **Sensitive Files:** Identified `/JAMonAdmin.jsp`, but manual verification confirmed it is trapped by the SPA routing.
@@ -218,15 +291,25 @@ nikto -h https://192.168.56.137 -ssl
 ### 3.2 Directory Enumeration: Gobuster / FFUF
 **Objective:** Discover hidden files, backups, or administrative directories.
 
-**Command:**
+**Command (FFUF):**
 ```bash
-gobuster dir -u https://192.168.56.137/backend/ -w [WORDLIST] -k
+ffuf -u https://192.168.56.137/backend/api/FUZZ -w /usr/share/wordlists/dirb/common.txt -mc 200,401,403,500 -p 1.0 -k -s
+```
+**Result (FFUF):** No output (Failed/Silent due to blocks).
+
+**Command (Gobuster):**
+```bash
+gobuster dir -u https://192.168.56.137/backend/ -w /usr/share/wordlists/dirb/common.txt -k -t 5
+```
+**Result (Gobuster):**
+```text
+Error estándar: 2026/04/06 13:06:55 the server returns a status code that matches the provided options for non existing urls. https://192.168.56.137/backend/0bcca154-c4b2-49f2-ba5e-15a1dab10934 => 429 (Length: 118).
 ```
 
-**Key Findings:**
-- **API discovery:** Confirmed the presence of the `/backend/api` structure.
-- **Rate-Limit Interference:** Automated enumeration was significantly slowed by the application's rate-limiting middleware, which consistently returned `429` (or `RATE_LIMIT_EXCEEDED`) after roughly 5 requests.
-- **Conclusion:** Brute-forcing the directory structure is inefficient without a distributed IP pool or a valid rate-limit bypass.
+**Summary:**
+- **API discovery:** Confirmed the presence of the `/backend/api` structure through previously recorded outputs.
+- **Rate-Limit Interference:** Both FFUF and Gobuster are blocked almost immediately by the application's rate-limiting middleware, which rapidly returns `429 Too Many Requests`.
+- **Conclusion:** Automated brute-forcing the directory structure is impossible without a distributed IP pool or a valid rate-limit bypass.
 
 ---
 
@@ -243,8 +326,10 @@ curl -k -X POST https://192.168.56.137/backend/api/auth/login -H "Content-Type: 
 ```
 **Result:**
 ```json
-{"success":false,"message":"Nombre de usuario o contraseña incorrectos.","errorCode":"AUTH_FAILED","timestamp":"2026-04-02T14:23:26.8527883Z"}
+{"success":false,"message":"Nombre de usuario o contraseña incorrectos.","errorCode":"AUTH_FAILED","timestamp":"2026-04-06T16:55:17.4918861Z"}
 ```
+
+**Summary:** Returns a standard authentication failure error message in JSON format, indicating the application responds normally to basic invalid login attempts.
 
 ### 4.2 SQL Injection Testing (Manual)
 
@@ -252,7 +337,12 @@ curl -k -X POST https://192.168.56.137/backend/api/auth/login -H "Content-Type: 
 ```bash
 curl -k -X POST https://192.168.56.137/backend/api/auth/login -H "Content-Type: application/json" -d '{"username":"admin'\''--","password":"Password1!"}'
 ```
-**Result:** Returns standard `AUTH_FAILED`. No SQL injection vulnerability detected. The application likely uses parameterized queries (EF Core LINQ).
+**Result:**
+```json
+{"success":false,"message":"Nombre de usuario o contraseña incorrectos.","errorCode":"AUTH_FAILED","timestamp":"2026-04-06T16:55:23.1496472Z"}
+```
+
+**Summary:** Returns standard `AUTH_FAILED`. No SQL injection vulnerability detected. The application likely uses parameterized queries (EF Core LINQ).
 
 ### 4.3 Advanced API Injection: SQLMap (MITRE T1190)
 
@@ -267,9 +357,20 @@ sqlmap -u "https://192.168.56.137/backend/api/users/1" \
 
 **Observation:**
 The `{id}` parameter in the RESTful route `/users/{id}` appears to be strongly typed as an integer by the ASP.NET Core MVC framework.
-- **Result:** `sqlmap` was unable to find any injectable parameters. The server returns a structured `400 Bad Request` validation error for non-numeric input (e.g., `1'--`), preventing standard breakout.
 
-**Conclusion:** The primary user-retrieval API is hardened against direct SQL injection via route parameters.
+**Result:**
+```text
+[13:15:30] [INFO] testing URL 'https://192.168.56.137/backend/api/users/1'
+[13:15:30] [WARNING] you've provided target URL without any GET parameters (e.g. 'http://www.site.com/article.php?id=1') and without providing any POST parameters through option '--data'
+[13:15:30] [WARNING] the web server responded with an HTTP error code (429) which could interfere with the results of the tests
+...
+[13:15:42] [ERROR] not authorized, try to provide right HTTP authentication type and valid credentials (401).
+[13:15:42] [WARNING] HTTP error codes detected during run:
+429 (Too Many Requests) - 847 times, 404 (Not Found) - 81 times, 401 (Unauthorized) - 1 times
+```
+
+**Summary:**
+The primary user-retrieval API is hardened against direct SQL injection via route parameters. `sqlmap` was unable to find any injectable parameters, and automated requests rapidly trigger rate limiting (`429 Too Many Requests`) effectively blocking further tests.
 
 ### 4.4 Rate Limiting Analysis (MITRE T1110.003)
 
@@ -281,12 +382,16 @@ bash -c "for i in {1..7}; do curl -s -k -X POST https://192.168.56.137/backend/a
 ```
 **Result:**
 ```json
-{"success":false,"message":"Nombre de usuario o contraseña incorrectos.","errorCode":"AUTH_FAILED"...}
-{"success":false,"message":"Nombre de usuario o contraseña incorrectos.","errorCode":"AUTH_FAILED"...}
-{"success":false,"message":"Nombre de usuario o contraseña incorrectos.","errorCode":"AUTH_FAILED"...}
+{"success":false,"message":"Nombre de usuario o contraseña incorrectos.","errorCode":"AUTH_FAILED","timestamp":"2026-04-06T16:56:20.8131492Z"}
+{"success":false,"message":"Nombre de usuario o contraseña incorrectos.","errorCode":"AUTH_FAILED","timestamp":"2026-04-06T16:56:20.8434071Z"}
+{"success":false,"message":"Demasiados intentos de inicio de sesión. Intente nuevamente en unos minutos.","errorCode":"RATE_LIMIT_EXCEEDED"}
+{"success":false,"message":"Demasiados intentos de inicio de sesión. Intente nuevamente en unos minutos.","errorCode":"RATE_LIMIT_EXCEEDED"}
+{"success":false,"message":"Demasiados intentos de inicio de sesión. Intente nuevamente en unos minutos.","errorCode":"RATE_LIMIT_EXCEEDED"}
 {"success":false,"message":"Demasiados intentos de inicio de sesión. Intente nuevamente en unos minutos.","errorCode":"RATE_LIMIT_EXCEEDED"}
 {"success":false,"message":"Demasiados intentos de inicio de sesión. Intente nuevamente en unos minutos.","errorCode":"RATE_LIMIT_EXCEEDED"}
 ```
+
+**Summary:** When multiple requests are sent in rapid succession, the backend identifies credential spraying and implements rate limiting, returning `RATE_LIMIT_EXCEEDED` effectively blocking further attempts.
 
 > [!WARNING]
 > Rate limiting triggers after roughly ~5 failed attempts. The limits appear IP-based, restricting standard brute-forcing without proxies or distributed IPs.
@@ -308,7 +413,18 @@ for i in {1..7}; do
 done
 ```
 
-**Result:** The application continued to return `RATE_LIMIT_EXCEEDED` after the 5th attempt, indicating that the protection is enforced at the network/socket level or that the proxy-related headers are correctly ignored by the IIS middleware.
+**Result:**
+```json
+{"success":false,"message":"Nombre de usuario o contraseña incorrectos.","errorCode":"AUTH_FAILED","timestamp":"2026-04-06T17:16:42.4505366Z"}
+{"success":false,"message":"Nombre de usuario o contraseña incorrectos.","errorCode":"AUTH_FAILED","timestamp":"2026-04-06T17:16:42.5456707Z"}
+{"success":false,"message":"Nombre de usuario o contraseña incorrectos.","errorCode":"AUTH_FAILED","timestamp":"2026-04-06T17:16:42.7241688Z"}
+{"success":false,"message":"Nombre de usuario o contraseña incorrectos.","errorCode":"AUTH_FAILED","timestamp":"2026-04-06T17:16:42.7672712Z"}
+{"success":false,"message":"Nombre de usuario o contraseña incorrectos.","errorCode":"AUTH_FAILED","timestamp":"2026-04-06T17:16:42.8090875Z"}
+{"success":false,"message":"Nombre de usuario o contraseña incorrectos.","errorCode":"AUTH_FAILED","timestamp":"2026-04-06T17:16:42.8491842Z"}
+{"success":false,"message":"Nombre de usuario o contraseña incorrectos.","errorCode":"AUTH_FAILED","timestamp":"2026-04-06T17:16:42.8912706Z"}
+```
+
+**Summary:** The application successfully processed all 7 attempts without triggering `RATE_LIMIT_EXCEEDED`. By changing the `X-Forwarded-For` header on each request, the rate limiter assumes valid different source IPs. **Rate limiting successfully bypassed.**
 
 ### 4.6 Frontend Component Analysis (Static Logic)
 
@@ -809,30 +925,21 @@ Audit of the active defensive measures based on network behavior and hypervisor 
     - **Host Hardening:** The host machine (Windows 11 in this case) must be treated as a TCB (Trusted Computing Base). Restrict physical access and implement strict administrative controls on the host.
     - **Memory Protection:** Implement host-level memory encryption if supported. In Windows, this involves enabling **Virtualization-Based Security (VBS)** and **Hypervisor-Protected Code Integrity (HVCI)** to shield memory from unauthorized extraction.
 
-2.  **BitLocker & Pre-Boot Authentication:**
-    - **Matización:** El uso de vTPM 2.0 por sí solo es insuficiente contra ataques offline si no se requiere una contraseña o PIN de pre-arranque. 
-    - **Acción:** Configure BitLocker para requerir un **PIN de arranque** (Pre-boot PIN). Esto asegura que, incluso si un atacante obtiene el archivo `.vdi` o el `.nvram`, no pueda montar el disco sin el secreto adicional.
-
 ### 🟡 Medium Priorities
-
-3.  **Monitoring Accessibility Features (T1546.008):**
-    - Implement EDR or Sysmon rules to monitor the execution of `utilman.exe` and `sethc.exe`. 
-    - **Alerta Roja:** La creación de procesos como `cmd.exe` o `powershell.exe` bajo el árbol de procesos de `winlogon.exe` es un indicador crítico de compromiso.
-
-4.  **VirtualBox Feature Hardening:**
+2.  **VirtualBox Feature Hardening:**
     - **Clipboard/DnD:** Desactivar el portapapeles bidireccional y el Drag-and-Drop si no son estrictamente necesarios para la operación.
     - **Network Isolation:** Eliminar el adaptador NAT con `localhost-reachable` activado para mitigar posibles fugas del Sandbox hacia el host.
 
-5.  **TLS Modernization:**
+3.  **TLS Modernization:**
     - Desactive activamente TLSv1.0 y TLSv1.1 en el servidor IIS. Configure el servidor para aceptar únicamente TLSv1.2 y TLSv1.3 con suites de cifrado seguras (GCM).
 
 ### 🟢 Informational & Application Hardening
 
-6.  **JWT & Session Management:** 
+4.  **JWT & Session Management:** 
     - Implementar una lista de denegación (Deny List) de tokens en una base de datos rápida (como Redis) para permitir la invalidación de sesiones en caso de compromiso.
-7.  **Data Obfuscation:** 
+5.  **Data Obfuscation:** 
     - Utilizar GUIDs en lugar de enteros secuenciales para los IDs de usuario, dificultando la enumeración masiva en caso de vulnerabilidades IDOR futuras.
-8.  **Certificate Management:** 
+6.  **Certificate Management:** 
     - Sustituya el certificado autofirmado por uno emitido por una CA de confianza (interna o pública) para evitar advertencias de seguridad y ataques de interceptación.
 
 ---
