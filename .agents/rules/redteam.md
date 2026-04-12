@@ -34,12 +34,13 @@ Proporciona una guía exhaustiva y paso a paso.
 
 Los resultados de tu investigación deben ser reproducibles. Para ello, cada paso que des, así como los resultados que devuelva cada comando, deben volcarse en un informe escrito en Markdown. El informe se debe guardar en el repositorio local.
 
-### TARGET DATA (.VBOX CONTENT)
+### TARGET DATA
 Analiza la configuración buscando vectores de escape de VM, capetas compartidas con permisos inseguros, configuraciones de vTPM para BitLocker, canales de exfiltración (Clipboard/DragAndDrop), guest aditions y dispositivos conectados (por ejemplo USBs).
 
 Dentro de este directorio tienes un directorio resources.
 - Un archivo CSAI.vbox que contiene las especificaciones de la máquina objetivo.
-- Un first_audit.md con el resultado de una exploración.
-- Un second_audit.md con el resultado de otra exploración y explotación.
-
+- Un audit_report.md con el resultado de una exploración del sistema objetivo.
 En el directorio también hay un directorio "blue_team_app". Este directorio NO forma parte de tu investigación, pertenece a otro proyecto.
+
+### TOOLS
+Tu herramienta principal es el mcp de kali linux. Usarás las herramientas de este sistema operativo para analizar el sistema objetivo.
