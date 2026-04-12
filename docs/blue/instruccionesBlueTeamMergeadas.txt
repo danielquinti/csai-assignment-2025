@@ -1,0 +1,1174 @@
+################################################################################
+#                     GUIA DE DESPLIEGUE — SecureCatalog                       #
+#        Cada fase es un bloque copiable. Ejecutar en orden.                   #
+################################################################################
+
+
+# ==============================================================================
+# FASE 1: CREAR Y CONFIGURAR LA MAQUINA VIRTUAL
+# Ejecutar en: VirtualBox (GUI) + consola de la VM
+# ==============================================================================
+
+# --- 1.1 Crear la VM en VirtualBox (GUI) ---
+# - Imagen: Windows Server
+# - RAM: 4096 MB
+# - CPUs: 2
+# - Disco: 50 GB
+
+
+# --- 1.2 Configurar redes (ANTES de arrancar la VM) ---
+# En VirtualBox:
+#   - Adaptador 1: NAT (acceso a internet)
+#   - Adaptador 2: Host-Only con IP estática
+#     - Prefijo IPv4: 192.168.56.1
+#     - Mascara: 255.255.255.0
+#     - DHCP: desactivado
+
+
+# - Sistema -> Placa base -> Activar UEFI y Secure Boot
+# --- 1.3 Instalacion de Windows ---
+# Cuando aparezca la pantalla de seleccionar volumen de almacenamiento:
+# eliminar el volumen existente y despues seleccionarlo de nuevo.
+# - Attended installation: contraseña *(Aa}N#27260
+
+# --- 1.4 Configurar IP estatica en la VM (ejecutar en la consola de la VM) ---
+# Identificar el indice del adaptador Host-Only (el que no tiene puerta de enlace):
+Get-NetAdapter
+ipconfig
+
+# Mostrar adaptadores para identificar el Host-Only (el que NO tiene puerta de enlace)
+Get-NetAdapter | Format-Table Name, InterfaceIndex, Status -AutoSize
+ipconfig
+
+# Sustituir X por el indice del adaptador Host-Only correcto:
+$adapterIndex = Read-Host "Introduce el InterfaceIndex del adaptador Host-Only"
+New-NetIPAddress -InterfaceIndex $adapterIndex -IPAddress 192.168.56.10 -PrefixLength 24
+
+# ==============================================================================
+# FASE 1.5: HABILITAR SSH
+# Ejecutar en: consola de la VM
+# Permite administrar el servidor remotamente desde el host.
+# ==============================================================================
+
+# Abrir el puerto 22 en el firewall sin desactivar el firewall completo
+New-NetFirewallRule -Name "Allow_SSH" -DisplayName "Allow SSH (TCP 22)" -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22
+
+# Configurar el servicio SSH para que arranque automaticamente
+Set-Service -Name sshd -StartupType Automatic
+Start-Service sshd
+
+# --- Menu inicial de SConfig (ejecutar manualmente) ---
+# 1. Actualizar > Todas las actualizaciones de calidad > Todas
+# Pulsar enter para que avance
+# 2. Cambiar nombre del equipo PENDIENTE!
+
+
+
+# ==============================================================================
+# FASE 1.7: BITLOCKER — Cifrado del disco
+# Ejecutar en: consola de la VM (requiere reinicio)
+# Protege los datos en reposo si alguien accede al disco fisico.
+# PREREQUISITO: Secure Boot activado en la VM, si no pedira la clave cada arranque.
+# ==============================================================================
+
+# Instalar la feature de BitLocker (reinicia automaticamente)
+Install-WindowsFeature BitLocker -Restart
+
+# --- Despues del reinicio: ---
+# En VirtualBox:
+#   - Sistema -> Placa base -> Activar TPM 2.0
+#   - Almacenamiento -> Eliminar el CD con la imagen de Windows
+
+# Verificar que el TPM esta disponible
+Get-Tpm
+
+# Crear protector de clave de recuperacion (GUARDAR esta clave)
+Add-BitLockerKeyProtector -MountPoint "C:" -RecoveryPasswordProtector
+# Clave de recuperacion: 645623-718168-367730-614449-013959-572715-575498-041371
+
+# Activar BitLocker con protector TPM
+Enable-BitLocker -MountPoint "C:" -EncryptionMethod Aes256 -TpmProtector -UsedSpaceOnly
+Restart-Computer
+
+# Verificar progreso del cifrado despues del reinicio
+Get-BitLockerVolume -MountPoint "C:"
+#Cuando esté encriptado
+Restart-Computer
+
+
+# ==============================================================================
+# FASE 2.5: HABILITAR SSH CON PRIVILEGIOS DE ADMINISTRADOR
+# Problema: las sesiones SSH en Windows Server no se elevan a admin
+# aunque el usuario pertenezca al grupo Administrators.
+# Sin esto, las fases 3-5 fallan si se ejecutan por SSH.
+# ==============================================================================
+
+# --- PASO A: Crear y enviar el script de fix (ejecutar en el HOST) ---
+@'
+# Comentar la directiva que fuerza shell restringido para administradores
+$f = "C:\ProgramData\ssh\sshd_config"
+(Get-Content $f) -replace '^(Match Group administrators)', '# $1' -replace '^\s+(ForceCommand .+)', '# $1' | Set-Content $f
+# Establecer PowerShell como shell por defecto de SSH
+New-ItemProperty -Path "HKLM:\SOFTWARE\OpenSSH" -Name DefaultShell -Value "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -PropertyType String -Force
+Restart-Service sshd
+Write-Host "OK - Reconecta SSH para tener privilegios de admin"
+'@ | Out-File -FilePath "$env:TEMP\fix-ssh.ps1" -Encoding UTF8
+
+scp "$env:TEMP\fix-ssh.ps1" Administrador@192.168.56.10:C:/Users/Administrador/fix-ssh.ps1
+
+# --- PASO B: Ejecutar el script en la CONSOLA de la VM (no por SSH) ---
+powershell -File C:\Users\Administrador\fix-ssh.ps1
+
+# --- PASO C: Verificar (reconectar por SSH desde el HOST) ---
+ssh Administrador@192.168.56.10
+([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+# Debe devolver: True
+
+# ==============================================================================
+# FASE 2: INSTALAR DEPENDENCIAS (IIS + .NET + SQL Server)
+# Ejecutar en: servidor (VM) salvo donde se indique HOST
+# ==============================================================================
+
+# --- 2.1 Instalar IIS ---
+Install-WindowsFeature -Name Web-Server -IncludeManagementTools
+
+# --- 2.2 Instalar ASP.NET Core Hosting Bundle ---
+# Descargar en el HOST y copiar al servidor:
+Invoke-WebRequest -Uri "https://aka.ms/dotnet/8.0/dotnet-hosting-win.exe" -OutFile "$env:TEMP\dotnet-hosting.exe"
+scp "$env:TEMP\dotnet-hosting.exe" Administrador@192.168.56.10:C:/Users/Administrador/dotnet-hosting.exe
+
+# Instalar en el SERVIDOR:
+& "C:\Users\Administrador\dotnet-hosting.exe" /install /quiet /norestart
+
+# Verificar que el modulo se instalo correctamente (esperar ~1 min a que termine)
+Get-WebGlobalModule -Name "AspNetCoreModuleV2"
+iisreset
+
+# --- 2.6 Instalar SQL Server Express ---
+# Descargar en el HOST y copiar al servidor:
+Invoke-WebRequest -Uri "https://download.microsoft.com/download/3/8/d/38de7036-2433-4207-8eae-06e247e17b25/SQLEXPR_x64_ENU.exe" -OutFile "$env:TEMP\SQLEXPR_x64_ENU.exe"
+scp "$env:TEMP\SQLEXPR_x64_ENU.exe" Administrador@192.168.56.10:"C:\Users\Administrador\AppData\Local\Temp\"
+
+# Instalar silenciosamente en el SERVIDOR:
+& "$env:TEMP\SQLEXPR_x64_ENU.exe" /Q /ACTION=Install /IACCEPTSQLSERVERLICENSETERMS /FEATURES=SQLEngine /INSTANCENAME=SQLEXPRESS /SQLSVCACCOUNT="NT AUTHORITY\Network Service" /SQLSYSADMINACCOUNTS="BUILTIN\Administrators" /TCPENABLED=1 /NPENABLED=0 /UPDATEENABLED=0
+
+# Verificar que se instalo y esta corriendo
+Get-Process -Name "setup" -ErrorAction SilentlyContinue
+Get-Service -Name "MSSQL*"
+
+# Arrancar el servicio si no esta corriendo
+Start-Service -Name 'MSSQL$SQLEXPRESS'
+
+# --- 2.7 Crear login SQL dedicado (principio de minimo privilegio) ---
+$sqlConnection = New-Object System.Data.SqlClient.SqlConnection("Server=localhost\SQLEXPRESS;Integrated Security=True;")
+$sqlConnection.Open()
+$sqlCommand = $sqlConnection.CreateCommand()
+$sqlCommand.CommandText = "CREATE LOGIN [SecureCatalogApp] WITH PASSWORD = 'eFd@t333whVP', CHECK_POLICY = ON;"
+$sqlCommand.ExecuteNonQuery()
+$sqlConnection.Close()
+Write-Host "Login 'SecureCatalogApp' created successfully!" -ForegroundColor Green
+
+# --- 2.8 Configurar connection string como variable de entorno ---
+# NUNCA guardar credenciales en appsettings.json ni en el repositorio.
+# ASP.NET Core lee ConnectionStrings__DefaultConnection automaticamente.
+[Environment]::SetEnvironmentVariable(
+    "ConnectionStrings__DefaultConnection",
+    "Server=localhost\SQLEXPRESS;Database=SecureCatalogDb;Trusted_Connection=True;MultipleActiveResultSets=true;TrustServerCertificate=True;Encrypt=True;",
+    "Machine"
+)
+
+# Refrescar la sesion actual para que la variable este disponible inmediatamente
+$env:ConnectionStrings__DefaultConnection = [Environment]::GetEnvironmentVariable("ConnectionStrings__DefaultConnection", "Machine")
+
+# --- 2.4 Publicar la app (ejecutar en el HOST) ---
+cd C:\Users\danie\csai-assignment-2025\src\SecureCatalog; dotnet restore; dotnet publish -c Release
+
+# --- 2.5 Copiar el publicado al servidor (ejecutar en el HOST) ---
+scp -r "C:\Users\danie\csai-assignment-2025\src\SecureCatalog\bin\Release\net8.0\publish" Administrador@192.168.56.10:C:/Users/Administrador/SecureCatalog_Publish
+
+# ==============================================================================
+# VERSION CON DESCARGA DESDE GUEST (CREO QUE ESTA NO ES)
+# FASE 2: INSTALAR DEPENDENCIAS (IIS + .NET + SQL Server)
+# Ejecutar en: servidor (VM) salvo donde se indique HOST
+# ==============================================================================
+
+# --- 2.1 Instalar IIS ---
+Install-WindowsFeature -Name Web-Server -IncludeManagementTools
+
+# --- 2.2 Instalar ASP.NET Core Hosting Bundle ---
+# Permite que IIS ejecute aplicaciones .NET 8
+Invoke-WebRequest -Uri "https://aka.ms/dotnet/8.0/dotnet-hosting-win.exe" -OutFile "$env:TEMP\dotnet-hosting.exe"
+& "$env:TEMP\dotnet-hosting.exe" /install /quiet /norestart
+
+# Verificar que el modulo se instalo correctamente (esperar ~1 min a que termine)
+Get-WebGlobalModule -Name "AspNetCoreModuleV2"
+iisreset
+
+# --- 2.3 Verificar .NET ---
+dotnet --version
+# Esperado: 8.0.x
+
+# --- 2.4 Publicar la app (ejecutar en el HOST) ---
+cd C:\Users\danie\csai-assignment-2025\src\SecureCatalog; dotnet restore; dotnet publish -c Release
+
+# --- 2.5 Copiar el publicado al servidor (ejecutar en el HOST) ---
+scp -r "C:\Users\danie\csai-assignment-2025\src\SecureCatalog\bin\Release\net8.0\publish" vboxuser@192.168.56.10:C:/Users/vboxuser/SecureCatalog_Publish
+
+# --- 2.6 Instalar SQL Server Express ---
+# Descargar en el HOST y copiar al servidor:
+Invoke-WebRequest -Uri "https://download.microsoft.com/download/3/8/d/38de7036-2433-4207-8eae-06e247e17b25/SQLEXPR_x64_ENU.exe" -OutFile "C:\SQLEXPR_x64_ENU.exe"
+scp "$env:TEMP\SQLEXPR_x64_ENU.exe" vboxuser@192.168.56.10:"C:\Users\vboxuser\AppData\Local\Temp\"
+
+# Instalar silenciosamente en el SERVIDOR:
+& "C:\Users\vboxuser\AppData\Local\Temp\SQLEXPR_x64_ENU.exe" /Q /ACTION=Install /IACCEPTSQLSERVERLICENSETERMS /FEATURES=SQLEngine /INSTANCENAME=SQLEXPRESS /SQLSVCACCOUNT="NT AUTHORITY\Network Service" /SQLSYSADMINACCOUNTS="BUILTIN\Administrators" /TCPENABLED=1 /NPENABLED=0 /UPDATEENABLED=0
+
+# Verificar que se instalo y esta corriendo
+Get-Process -Name "setup" -ErrorAction SilentlyContinue
+Get-Service -Name "MSSQL*"
+
+# Arrancar el servicio si no esta corriendo
+Start-Service -Name 'MSSQL$SQLEXPRESS'
+
+# --- 2.7 Crear login SQL dedicado (principio de minimo privilegio) ---
+$sqlConnection = New-Object System.Data.SqlClient.SqlConnection("Server=localhost\SQLEXPRESS;Integrated Security=True;")
+$sqlConnection.Open()
+$sqlCommand = $sqlConnection.CreateCommand()
+$sqlCommand.CommandText = "CREATE LOGIN [SecureCatalogApp] WITH PASSWORD = 'eFd@t333whVP', CHECK_POLICY = ON;"
+$sqlCommand.ExecuteNonQuery()
+$sqlConnection.Close()
+Write-Host "Login 'SecureCatalogApp' created successfully!" -ForegroundColor Green
+
+# --- 2.8 Configurar connection string como variable de entorno ---
+# NUNCA guardar credenciales en appsettings.json ni en el repositorio.
+# ASP.NET Core lee ConnectionStrings__DefaultConnection automaticamente.
+[Environment]::SetEnvironmentVariable(
+    "ConnectionStrings__DefaultConnection",
+    "Server=localhost\SQLEXPRESS;Database=SecureCatalogDb;Trusted_Connection=True;MultipleActiveResultSets=true;TrustServerCertificate=True;Encrypt=True;",
+    "Machine"
+)
+
+# Refrescar la sesion actual para que la variable este disponible inmediatamente
+$env:ConnectionStrings__DefaultConnection = [Environment]::GetEnvironmentVariable("ConnectionStrings__DefaultConnection", "Machine")
+
+# --- 2.9 Anadir dotnet al PATH (solo si 'dotnet --version' no funciona) ---
+$oldPath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+$newPath = $oldPath + ";C:\Program Files\dotnet\"
+[Environment]::SetEnvironmentVariable("Path", $newPath, "Machine")
+
+
+
+
+# ==============================================================================
+# FASE 3: GENERAR CERTIFICADO TLS AUTOFIRMADO
+# Ejecutar en: servidor (por SSH o consola, como Administrador)
+# Necesario para que IIS sirva HTTPS.
+# ==============================================================================
+
+# Generar certificado autofirmado valido para la IP del servidor y localhost
+$cert = New-SelfSignedCertificate `
+    -DnsName "192.168.56.10", "localhost", "$env:COMPUTERNAME" `
+    -CertStoreLocation "Cert:\LocalMachine\My" `
+    -NotAfter (Get-Date).AddYears(2) `
+    -KeyAlgorithm RSA -KeyLength 2048 `
+    -FriendlyName "SecureCatalog IIS"
+
+# Guardar el thumbprint — se necesita en la Fase 4 para vincular HTTPS
+$thumbprint = $cert.Thumbprint
+Write-Host "Thumbprint del certificado: $thumbprint"
+# >>> ANOTAR ESTE VALOR <<<
+
+
+# ==============================================================================
+# FASE 4: DESPLIEGUE, CONFIGURACION HTTPS Y PERMISOS EN IIS
+# Ejecutar en: servidor (como Administrador)
+# Configura el sitio web, vincula el certificado TLS y da acceso a SQL Server.
+# ==============================================================================
+
+Import-Module WebAdministration
+
+# --- Variables ---
+$appPath = "C:\inetpub\wwwroot\SecureCatalog"
+$appName = "SecureCatalog"
+$appPoolName = "SecureCatalogPool"
+# Recuperar el thumbprint automaticamente del certificado generado en Fase 3
+$thumbprint = (Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.FriendlyName -eq "SecureCatalog IIS" }).Thumbprint
+if (-not $thumbprint) { Write-Error "No se encontro el certificado 'SecureCatalog IIS'. Ejecuta la Fase 3 primero."; return }
+Write-Host "Usando certificado con thumbprint: $thumbprint"
+
+# --- 4.1 Preparar el directorio y mover los archivos publicados ---
+New-Item -ItemType Directory -Path "$appPath\Keys" -Force
+Move-Item -Path "C:\Users\Administrador\SecureCatalog_Publish\*" -Destination $appPath -Force
+
+# --- 4.2 Configurar el Application Pool ---
+# managedRuntimeVersion vacio = "Sin codigo administrado" (necesario para .NET 8 out-of-process)
+New-WebAppPool -Name $appPoolName -ErrorAction SilentlyContinue
+Set-ItemProperty -Path "IIS:\AppPools\$appPoolName" -Name "managedRuntimeVersion" -Value ""
+Set-ItemProperty -Path "IIS:\AppPools\$appPoolName" -Name "autoStart" -Value "True"
+
+# --- 4.3 Eliminar el sitio por defecto de IIS ---
+# Si no se elimina, seguira sirviendo la landing de Windows Server en el puerto 80
+Stop-Website -Name "Default Web Site" -ErrorAction SilentlyContinue
+Remove-Website -Name "Default Web Site" -ErrorAction SilentlyContinue
+
+# --- 4.4 Crear el sitio web con HTTPS (443) + HTTP (80) para redireccion ---
+Remove-Website -Name $appName -ErrorAction SilentlyContinue
+New-Website -Name $appName -PhysicalPath $appPath -ApplicationPool $appPoolName -Port 443 -IPAddress "*" -HostHeader "" -Ssl -Force
+# El binding HTTP en puerto 80 permite que la app redirija automaticamente a HTTPS
+New-WebBinding -Name $appName -Protocol "http" -Port 80 -IPAddress "*"
+
+# --- 4.5 Vincular el certificado TLS al sitio ---
+# Usa netsh porque es mas fiable que el cmdlet AddSslCertificate
+$appId = [guid]::NewGuid().ToString()
+netsh http add sslcert ipport=0.0.0.0:443 certhash=$thumbprint appid="{$appId}" certstorename=My
+Write-Host "Certificado vinculado al sitio HTTPS"
+
+# --- 4.6 Configurar permisos del sistema de archivos ---
+# Limpiar permisos heredados rotos
+icacls $appPath /reset /T /C /Q
+# Lectura y ejecucion para el AppPool en todo el sitio
+icacls $appPath /grant "IIS AppPool\${appPoolName}:(OI)(CI)RX" /T
+# Modificacion en Keys/ para que Data Protection pueda escribir el key ring
+icacls "$appPath\Keys" /grant "IIS AppPool\${appPoolName}:(OI)(CI)M" /T
+# Lectura para usuarios anonimos (necesario para archivos estaticos)
+icacls $appPath /grant "IUSR:(OI)(CI)RX" /T
+
+# --- 4.7 Dar acceso al AppPool a SQL Server ---
+# La app usa Trusted_Connection=True, asi que se conecta con la identidad Windows
+# del AppPool (IIS AppPool\SecureCatalogPool). Sin este paso, la app no puede
+# conectar a la BD y crashea con 500.30.
+# Se usa db_owner porque MigrateAsync() necesita crear tablas (DDL) en el primer arranque.
+$sqlConn = New-Object System.Data.SqlClient.SqlConnection("Server=localhost\SQLEXPRESS;Integrated Security=True;")
+$sqlConn.Open()
+$cmd = $sqlConn.CreateCommand()
+$cmd.CommandText = "IF DB_ID('SecureCatalogDb') IS NULL CREATE DATABASE SecureCatalogDb;"
+$cmd.ExecuteNonQuery()
+$cmd.CommandText = "IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name = 'IIS AppPool\SecureCatalogPool') CREATE LOGIN [IIS AppPool\SecureCatalogPool] FROM WINDOWS;"
+$cmd.ExecuteNonQuery()
+$cmd.CommandText = "USE SecureCatalogDb; IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = 'IIS AppPool\SecureCatalogPool') CREATE USER [IIS AppPool\SecureCatalogPool] FOR LOGIN [IIS AppPool\SecureCatalogPool]; ALTER ROLE db_owner ADD MEMBER [IIS AppPool\SecureCatalogPool];"
+$cmd.ExecuteNonQuery()
+$sqlConn.Close()
+Write-Host "AppPool identity granted access to SecureCatalogDb" -ForegroundColor Green
+
+# --- 4.8 Reinicio limpio ---
+Stop-Website -Name $appName -ErrorAction SilentlyContinue
+Restart-WebAppPool -Name $appPoolName
+Start-Website -Name $appName
+
+
+# ==============================================================================
+# FASE 5: APERTURA DEL FIREWALL Y PRUEBA FINAL
+# Ejecutar en: servidor (como Administrador)
+# ==============================================================================
+
+# --- 5.1 Abrir puerto 443 (HTTPS) en el firewall ---
+New-NetFirewallRule -DisplayName "SecureCatalog HTTPS (443)" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 443
+
+# --- 5.2 Abrir puerto 80 (HTTP) para que la redireccion a HTTPS funcione ---
+New-NetFirewallRule -DisplayName "SecureCatalog HTTP (80)" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 80
+
+# --- NOTA: Si ya ejecutaste la Fase 4 antes de estos cambios, aplica el fix: ---
+# Import-Module WebAdministration
+# Stop-Website -Name "Default Web Site" -ErrorAction SilentlyContinue
+# Remove-Website -Name "Default Web Site" -ErrorAction SilentlyContinue
+# New-WebBinding -Name "SecureCatalog" -Protocol "http" -Port 80 -IPAddress "*"
+# Restart-WebAppPool -Name "SecureCatalogPool"
+
+# --- 5.3 Probar desde el navegador del HOST ---
+# Abrir: https://192.168.56.10 (aceptar aviso de certificado autofirmado)
+
+
+# ==============================================================================
+# FASE 6: CONFIGURAR IIS PARA ARRANQUE AUTOMATICO (SIN LOGIN)
+# Ejecutar en: servidor (como Administrador)
+# Garantiza que IIS y la app esten disponibles desde el arranque del SO,
+# sin necesidad de que ningun usuario inicie sesion en la maquina.
+# ==============================================================================
+
+# --- 6.1 Dependencia de arranque: IIS espera a SQL Server ---
+# Sin esto, IIS arranca el AppPool ANTES de que SQL Server este listo.
+# La app llama MigrateAsync() al iniciar, falla la conexion y crashea con 500.30.
+# Con esta dependencia, Windows no arranca W3SVC hasta que MSSQL$SQLEXPRESS este Running.
+cmd /c 'sc config W3SVC depend= "WAS/MSSQL$SQLEXPRESS"'
+
+# Verificar que la dependencia se registro
+sc.exe qc W3SVC
+
+# --- 6.2 Asegurar arranque automatico de los servicios de IIS ---
+# W3SVC = World Wide Web Publishing Service (sirve peticiones HTTP/HTTPS)
+# WAS   = Windows Process Activation Service (gestiona los Application Pools)
+Set-Service -Name W3SVC -StartupType Automatic
+Set-Service -Name WAS   -StartupType Automatic
+
+# Verificar que estan configurados correctamente
+Get-Service W3SVC, WAS | Select-Object Name, StartType, Status
+
+# --- 6.3 Configurar el AppPool en modo AlwaysRunning ---
+# Por defecto el AppPool arranca "OnDemand" (espera la primera peticion HTTP).
+# Con AlwaysRunning se inicia junto con IIS, eliminando el cold-start.
+Import-Module WebAdministration
+Set-ItemProperty -Path "IIS:\AppPools\SecureCatalogPool" -Name "startMode" -Value "AlwaysRunning"
+
+# Verificar la configuracion
+Get-ItemProperty -Path "IIS:\AppPools\SecureCatalogPool" -Name "startMode"
+Get-ItemProperty -Path "IIS:\AppPools\SecureCatalogPool" -Name "autoStart"
+# autoStart debe ser True (ya configurado en Fase 4.2)
+# startMode debe ser AlwaysRunning
+
+# ==============================================================================
+# PECHAR MAQUINA PARA ENTREGAR
+# Ejecutar en: servidor (como Administrador)
+# Hardening final antes de la entrega.
+# ==============================================================================
+
+
+# ==============================================================================
+# HARDENING DE CUENTAS DE USUARIO
+# Ejecutar en: servidor (como Administrador)
+# ==============================================================================
+
+# --- Ver cuentas activas (DefaultAccount y WDAGUtilityAccount se ignoran) ---
+net user
+
+# --- Renombrar la cuenta de administrador a "user2" ---
+# Elegimos un nombre que pase desapercibido (No uses 'Admin', 'Root' o 'God')
+$nuevoAdmin = "user2"
+Rename-LocalUser -Name "Administrador" -NewName $nuevoAdmin
+Write-Host "Nombre de Administrador oculto como: $nuevoAdmin" -ForegroundColor Green
+
+# --- Desactivar al Invitado y renombrar a "user3" ---
+Disable-LocalUser -Name "Invitado"
+Rename-LocalUser -Name "Invitado" -NewName "user3"
+
+# --- Reiniciar antes de continuar ---
+Write-Host "[!] Reinicia el servidor antes de continuar. Ejecuta: Restart-Computer" -ForegroundColor Yellow
+Read-Host "Pulsa ENTER cuando hayas reiniciado y vuelvas a tener sesion"
+
+# --- Verificar cuentas ---
+Get-LocalUser | Select-Object Name, SID, Enabled
+
+# ==============================================================================
+# HONEYTOKEN — Crear cuenta falsa "Administrador" sin permisos
+# ==============================================================================
+
+# --- Crear el falso admin ---
+$passSenuelo = ConvertTo-SecureString "7Vs*AGgRa3ca" -AsPlainText -Force
+New-LocalUser -Name "Administrador" -Password $passSenuelo -Description "Cuentas de gestion de backups" -PasswordNeverExpires
+
+# --- Reiniciar antes de verificar ---
+Write-Host "[!] Reinicia el servidor antes de continuar. Ejecuta: Restart-Computer" -ForegroundColor Yellow
+Read-Host "Pulsa ENTER cuando hayas reiniciado y vuelvas a tener sesion"
+
+# --- Verificar que no esta en ningun grupo (no deberia) ---
+Get-LocalGroup | Where-Object { Get-LocalGroupMember $_ | Where-Object {$_.Name -match "Administrador"} }
+
+# --- Bloqueo de inicio de sesion (aunque se acierte la contrasena, no podra acceder) ---
+# 1. Exportar la configuracion actual a un archivo temporal
+secedit /export /cfg C:\sec.cfg
+
+# 2. Anadir la denegacion de inicio de sesion para el falso "Administrador"
+# Esto impide que entre por consola, por red o por servicios remotos
+$config = Get-Content C:\sec.cfg
+$config = $config -replace 'SeDenyNetworkLogonRight = ', 'SeDenyNetworkLogonRight = Administrador,'
+$config = $config -replace 'SeDenyInteractiveLogonRight = ', 'SeDenyInteractiveLogonRight = Administrador,'
+$config | Set-Content C:\sec.cfg
+
+# 3. Importar la nueva configuracion
+secedit /configure /db $env:windir\security\local.sdb /cfg C:\sec.cfg /areas USER_RIGHTS
+
+# 4. Limpiar rastro
+Remove-Item C:\sec.cfg
+
+# --- Restringir acceso al sistema de archivos (tarda un poco) ---
+$acl = Get-Acl "C:\"
+$rule = New-Object System.Security.AccessControl.FileSystemAccessRule("Administrador","FullControl","Deny")
+$acl.AddAccessRule($rule)
+Set-Acl "C:\" $acl
+Write-Host "[+] Honeytoken 'Administrador' creado, bloqueado y sin acceso a disco." -ForegroundColor Green
+
+# --- Reiniciar ---
+Write-Host "[!] Reinicia el servidor antes de continuar. Ejecuta: Restart-Computer" -ForegroundColor Yellow
+Read-Host "Pulsa ENTER cuando hayas reiniciado y vuelvas a tener sesion"
+
+# ==============================================================================
+# TODO: Crear usuario con privilegios minimos (user1)
+# A partir de aqui, para funcionar como admin primero hay que loguearse
+# con un usuario sin admin.
+# ==============================================================================
+
+
+
+# Desactivar el auto-login (seguridad: no dejar sesion abierta desatendida)
+Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" -Name "AutoAdminLogon" -Value "0"
+
+- Pedir usuario y contraseña al iniciar (en vez de sugerir usuario y pedir solo contraseña)
+```
+# Forzar a que no se muestre el último nombre de usuario en la pantalla de logon
+Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "dontdisplaylastusername" -Value 1
+```
+PENDIENTE! No funciona
+
+# --- 1. Politica de bloqueo contra fuerza bruta ---
+net accounts /lockoutthreshold:10
+net accounts /lockoutduration:15
+net accounts /lockoutwindow:15
+Write-Host "[+] Politica de bloqueo configurada (10 intentos, 15 min lockout)." -ForegroundColor Green
+
+
+# Deshabilitar arranque seguro y modo de recuperacion
+reagentc /disable
+
+-----------------------------------------------------------------------------------------------------------------
+
+
+# --- 2. Deshabilitar SSH (ya no se necesita) ---
+Stop-Service sshd -ErrorAction SilentlyContinue
+Set-Service -Name sshd -StartupType 'Disabled' -ErrorAction SilentlyContinue
+Remove-NetFirewallRule -Name "Allow_SSH" -ErrorAction SilentlyContinue
+Write-Host "[+] SSH deshabilitado y regla de firewall eliminada." -ForegroundColor Green
+
+
+# --- 3. Firewall: bloquear todo y permitir solo HTTP/HTTPS ---
+Set-NetFirewallProfile -Profile Domain,Public,Private -DefaultInboundAction Block -DefaultOutboundAction Block
+New-NetFirewallRule -DisplayName "Allow_HTTP" -Direction Inbound -LocalPort 80 -Protocol TCP -Action Allow
+New-NetFirewallRule -DisplayName "Allow_HTTPS" -Direction Inbound -LocalPort 443 -Protocol TCP -Action Allow
+Write-Host "[+] Firewall bloqueado. Solo puertos 80 y 443 abiertos." -ForegroundColor Green
+
+# --- 4. Eliminar servicios prescindibles ---
+$servicesToStop = @(
+    "LanmanServer",   # SMB Server
+    "lmhosts",        # NetBIOS
+    "Dhcp",           # No necesario con IP Estatica
+    "DiagTrack",      # Telemetria
+    "W32Time",        # Sincronizacion por Hyper-V, no NTP
+    "TermService",    # Escritorio Remoto (RDP)
+    "Spooler"         # Cola de impresion
+)
+
+foreach ($service in $servicesToStop) {
+    if (Get-Service $service -ErrorAction SilentlyContinue) {
+        Stop-Service -Name $service -Force -ErrorAction SilentlyContinue
+        Set-Service -Name $service -StartupType Disabled
+        Write-Host "[-] Servicio $service deshabilitado." -ForegroundColor Yellow
+    }
+}
+
+#-- Nuevo comando
+
+# Lista maestra de servicios a neutralizar para máxima seguridad (Hardening)
+$servicesToStop = @(
+    "LanmanServer",             # SMB Server (Evita ejecución remota y Pass-the-Hash)
+    "LanmanWorkstation",        # SMB Client (Evita NTLM Relay saliente)
+    "WinRM",                    # Administración Remota de Windows (Bloquea Evil-WinRM)
+    "RemoteRegistry",           # Registro Remoto (Previene persistencia y recolección)
+    "TermService",              # Escritorio Remoto RDP (Evita acceso gráfico)
+    "UALSVC",                   # User Access Logging (Evita recolección de telemetría de usuarios)
+    "DiagTrack",                # Telemetría de Windows
+    "SQLTELEMETRY`$SQLEXPRESS", # Telemetría de SQL Server
+    "ssh-agent",                # Agente SSH (Innecesario si no saltas a otras máquinas)
+    "lmhosts",                  # NetBIOS (Mitiga envenenamiento LLMNR/NBT-NS)
+    "Spooler",                  # Cola de impresión (Mitiga PrintNightmare)
+    "Dhcp"                      # PRECAUCIÓN: Solo si tienes IP estática configurada en el OS
+    # "W32Time"                 # Comentado por seguridad. Descomenta si confías en VirtualBox Guest Additions para la hora.
+)
+
+Write-Host "[*] Iniciando purga de servicios innecesarios..." -ForegroundColor Cyan
+
+foreach ($service in $servicesToStop) {
+    # Comprobamos si el servicio existe antes de tocarlo
+    if (Get-Service $service -ErrorAction SilentlyContinue) {
+        
+        # Forzamos detención
+        Stop-Service -Name $service -Force -ErrorAction SilentlyContinue
+        
+        # Lo deshabilitamos permanentemente
+        Set-Service -Name $service -StartupType Disabled
+        
+        Write-Host "[+] Servicio $service detenido y deshabilitado con éxito." -ForegroundColor Green
+    } else {
+        Write-Host "[-] El servicio $service no existe en este sistema (omitido)." -ForegroundColor Gray
+    }
+}
+
+Write-Host "[*] Bastionado de servicios completado." -ForegroundColor Cyan
+
+# --- Hardening de red ---
+# Deshabilitar IPv6 para reducir la superficie de ataque (el Red Team suele usar IPv6 para saltarse firewalls mal configurados)
+Disable-NetAdapterBinding -Name "Ethernet" -ComponentID ms_tcpip6
+# Deshabilitar NetBIOS (evita que el servidor "grite" su nombre en la red)
+$regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\NetBT\Parameters\Interfaces"
+Get-ChildItem $regPath | ForEach-Object { Set-ItemProperty -Path $_.PSPath -Name "NetbiosOptions" -Value 2 }
+
+
+# --- 5. TODO: Eliminar binarios prescindibles ---
+# Pendiente de definir que binarios eliminar
+
+# Lista maestra de LOLBins (Tu lista original + Añadidos críticos modernos)
+$lolbins = @(
+    "$env:SystemRoot\System32\certutil.exe",
+    "$env:SystemRoot\System32\bitsadmin.exe",
+    "$env:SystemRoot\System32\ftp.exe",
+    "$env:SystemRoot\System32\finger.exe",
+    "$env:SystemRoot\System32\hh.exe",
+    "$env:SystemRoot\System32\esentutl.exe",
+    "$env:SystemRoot\System32\mshta.exe",
+    "$env:SystemRoot\System32\cscript.exe",
+    "$env:SystemRoot\System32\wscript.exe",
+    "$env:SystemRoot\System32\regsvr32.exe",
+    "$env:SystemRoot\System32\msiexec.exe",
+    "$env:SystemRoot\System32\wbem\wmic.exe",
+    "$env:SystemRoot\System32\pcalua.exe",
+    "$env:SystemRoot\System32\forfiles.exe",
+    "$env:SystemRoot\System32\SyncAppvPublishingServer.exe",
+    "$env:SystemRoot\System32\PresentationHost.exe",
+    "$env:SystemRoot\System32\at.exe",
+    "$env:SystemRoot\System32\extrac32.exe",
+    "$env:SystemRoot\System32\expand.exe",
+    "$env:SystemRoot\System32\print.exe",
+    "$env:SystemRoot\System32\replace.exe",
+    "$env:SystemRoot\System32\dnscmd.exe",
+    "$env:SystemRoot\System32\nltest.exe",
+    
+    # --- Añadidos Críticos (Modern Windows / Server 2025) ---
+    "$env:SystemRoot\System32\curl.exe",
+    "$env:SystemRoot\System32\tar.exe",
+    "$env:SystemRoot\System32\cmstp.exe",
+    "$env:SystemRoot\Microsoft.NET\Framework\v4.0.30319\msbuild.exe",
+    "$env:SystemRoot\Microsoft.NET\Framework64\v4.0.30319\msbuild.exe"
+)
+
+# Filtramos duplicados por si acaso
+$lolbins = $lolbins | Select-Object -Unique
+
+Write-Host "[*] Iniciando táctica de 'Tierra Quemada' para LOLBins..." -ForegroundColor Cyan
+
+foreach ($bin in $lolbins) {
+    if (Test-Path $bin) {
+        $newName = "$bin.bak"
+        
+        # Evitar errores si el archivo .bak ya existe por una ejecución previa
+        if (Test-Path $newName) {
+            Write-Host "[!] El archivo de backup ya existe, omitiendo: $bin" -ForegroundColor DarkGray
+            continue
+        }
+
+        try {
+            # Tomar propiedad y asignar permisos (silenciando la salida estándar para mantener la consola limpia)
+            takeown /F $bin /A | Out-Null
+            icacls $bin /grant Administrators:F | Out-Null
+            
+            # Renombrar el ejecutable
+            Rename-Item -Path $bin -NewName (Split-Path $newName -Leaf) -Force
+            Write-Host "[-] Renombrado y neutralizado: $bin" -ForegroundColor Yellow
+        } catch {
+            Write-Host "[!] Fallo al procesar: $bin - $($_.Exception.Message)" -ForegroundColor Red
+        }
+    } else {
+        # Si no lo encuentra, comprobamos si ya estaba renombrado
+        if (Test-Path "$bin.bak") {
+            Write-Host "[v] Ya estaba neutralizado previamente: $bin" -ForegroundColor Green
+        } else {
+            Write-Host "[i] No encontrado en el sistema (omitido): $bin" -ForegroundColor DarkGray
+        }
+    }
+}
+
+Write-Host "[*] Blindaje completado. El Red Team va a tener un mal día." -ForegroundColor Cyan
+
+# ==============================================================================
+# SYSMON — Monitoreo ofuscado de red, disco y procesos
+# PREREQUISITO: Descargar Sysmon en el HOST y copiarlo a la VM
+#   1. Descargar de https://learn.microsoft.com/es-es/sysinternals/downloads/sysmon
+#   2. scp "C:\...\Downloads\Sysmon.zip" vboxuser@192.168.56.10:C:\
+# Ejecutar en: servidor (como Administrador)
+# ==============================================================================
+
+# --- Crear carpeta de "sistema" falsa, extraer y ofuscar ---
+New-Item -Path "C:\Windows\System32\Drivers\en-US\NetworkData" -ItemType Directory -Force
+Expand-Archive -Path "C:\Sysmon.zip" -DestinationPath "C:\Windows\System32\Drivers\en-US\NetworkData"
+Set-Location "C:\Windows\System32\Drivers\en-US\NetworkData"
+Rename-Item -Path ".\Sysmon64.exe" -NewName "WinNetSvc.exe"
+
+# --- Configuracion del SIEM ---
+$xmlPath = "C:\Windows\System32\Drivers\en-US\NetworkData\WinNetSvc.xml"
+
+$config = @"
+<Sysmon schemaversion="4.90">
+
+  <HashAlgorithms>SHA256</HashAlgorithms>
+
+  <EventFiltering>
+
+    <!--
+    ===================================================================
+      RULE GROUP 1: DETECCIÓN DE WEBSHELLS
+      - Procesos hijos sospechosos lanzados por IIS (w3wp.exe)
+    ===================================================================
+    -->
+
+    <!-- Event ID 1: Process Creation -->
+    <RuleGroup name="WebshellDetection" groupRelation="or">
+      <ProcessCreate onmatch="include">
+
+        <!-- IIS worker lanzando cmd, powershell, o herramientas de reconocimiento -->
+        <Rule name="Webshell - cmd.exe from IIS" groupRelation="and">
+          <ParentImage condition="end with">w3wp.exe</ParentImage>
+          <Image condition="end with">cmd.exe</Image>
+        </Rule>
+
+        <Rule name="Webshell - powershell from IIS" groupRelation="and">
+          <ParentImage condition="end with">w3wp.exe</ParentImage>
+          <Image condition="end with">powershell.exe</Image>
+        </Rule>
+
+        <Rule name="Webshell - pwsh from IIS" groupRelation="and">
+          <ParentImage condition="end with">w3wp.exe</ParentImage>
+          <Image condition="end with">pwsh.exe</Image>
+        </Rule>
+
+        <!-- Herramientas de reconocimiento desde IIS -->
+        <Rule name="Webshell - whoami from IIS" groupRelation="and">
+          <ParentImage condition="end with">w3wp.exe</ParentImage>
+          <Image condition="end with">whoami.exe</Image>
+        </Rule>
+
+        <Rule name="Webshell - net.exe from IIS" groupRelation="and">
+          <ParentImage condition="end with">w3wp.exe</ParentImage>
+          <Image condition="end with">net.exe</Image>
+        </Rule>
+
+        <Rule name="Webshell - net1.exe from IIS" groupRelation="and">
+          <ParentImage condition="end with">w3wp.exe</ParentImage>
+          <Image condition="end with">net1.exe</Image>
+        </Rule>
+
+        <Rule name="Webshell - ipconfig from IIS" groupRelation="and">
+          <ParentImage condition="end with">w3wp.exe</ParentImage>
+          <Image condition="end with">ipconfig.exe</Image>
+        </Rule>
+
+        <Rule name="Webshell - systeminfo from IIS" groupRelation="and">
+          <ParentImage condition="end with">w3wp.exe</ParentImage>
+          <Image condition="end with">systeminfo.exe</Image>
+        </Rule>
+
+        <Rule name="Webshell - tasklist from IIS" groupRelation="and">
+          <ParentImage condition="end with">w3wp.exe</ParentImage>
+          <Image condition="end with">tasklist.exe</Image>
+        </Rule>
+
+        <Rule name="Webshell - certutil from IIS" groupRelation="and">
+          <ParentImage condition="end with">w3wp.exe</ParentImage>
+          <Image condition="end with">certutil.exe</Image>
+        </Rule>
+
+        <Rule name="Webshell - bitsadmin from IIS" groupRelation="and">
+          <ParentImage condition="end with">w3wp.exe</ParentImage>
+          <Image condition="end with">bitsadmin.exe</Image>
+        </Rule>
+
+        <Rule name="Webshell - cscript from IIS" groupRelation="and">
+          <ParentImage condition="end with">w3wp.exe</ParentImage>
+          <Image condition="end with">cscript.exe</Image>
+        </Rule>
+
+        <Rule name="Webshell - wscript from IIS" groupRelation="and">
+          <ParentImage condition="end with">w3wp.exe</ParentImage>
+          <Image condition="end with">wscript.exe</Image>
+        </Rule>
+
+        <!--
+        ===================================================================
+          RULE GROUP 2: MOVIMIENTO LATERAL
+        ===================================================================
+        -->
+
+        <!-- PsExec y herramientas remotas -->
+        <Rule name="Lateral Movement - PsExec">
+          <Image condition="end with">PsExec.exe</Image>
+        </Rule>
+
+        <Rule name="Lateral Movement - PsExec64">
+          <Image condition="end with">PsExec64.exe</Image>
+        </Rule>
+
+        <!-- PSEXESVC es el servicio que PsExec instala en el destino -->
+        <Rule name="Lateral Movement - PSEXESVC">
+          <Image condition="end with">PSEXESVC.exe</Image>
+        </Rule>
+
+        <!-- WMI remoto -->
+        <Rule name="Lateral Movement - WMIC">
+          <Image condition="end with">wmic.exe</Image>
+          <CommandLine condition="contains">node:</CommandLine>
+        </Rule>
+
+        <!-- WinRM / PowerShell Remoting -->
+        <Rule name="Lateral Movement - wsmprovhost" groupRelation="and">
+          <Image condition="end with">wsmprovhost.exe</Image>
+        </Rule>
+
+        <!-- Scheduled task remota -->
+        <Rule name="Lateral Movement - schtasks remote" groupRelation="and">
+          <Image condition="end with">schtasks.exe</Image>
+          <CommandLine condition="contains">/s </CommandLine>
+        </Rule>
+
+        <!-- sc.exe remoto -->
+        <Rule name="Lateral Movement - sc remote" groupRelation="and">
+          <Image condition="end with">sc.exe</Image>
+          <CommandLine condition="contains">\\</CommandLine>
+        </Rule>
+
+        <!-- mshta (T1218.005) -->
+        <Rule name="Suspicious - mshta">
+          <Image condition="end with">mshta.exe</Image>
+        </Rule>
+
+        <!-- rundll32 con URLs o rutas sospechosas -->
+        <Rule name="Suspicious - rundll32 with http" groupRelation="and">
+          <Image condition="end with">rundll32.exe</Image>
+          <CommandLine condition="contains">http</CommandLine>
+        </Rule>
+
+        <!--
+        ===================================================================
+          RULE GROUP 3: EJECUCIONES POWERSHELL SOSPECHOSAS
+        ===================================================================
+        -->
+
+        <Rule name="Suspicious PS - EncodedCommand">
+          <CommandLine condition="contains">-enc</CommandLine>
+        </Rule>
+
+        <Rule name="Suspicious PS - DownloadString">
+          <CommandLine condition="contains">DownloadString</CommandLine>
+        </Rule>
+
+        <Rule name="Suspicious PS - DownloadFile">
+          <CommandLine condition="contains">DownloadFile</CommandLine>
+        </Rule>
+
+        <Rule name="Suspicious PS - Invoke-Expression">
+          <CommandLine condition="contains">IEX</CommandLine>
+        </Rule>
+
+        <Rule name="Suspicious PS - Bypass ExecutionPolicy">
+          <CommandLine condition="contains">-ExecutionPolicy Bypass</CommandLine>
+        </Rule>
+
+        <Rule name="Suspicious PS - Hidden Window">
+          <CommandLine condition="contains">-WindowStyle Hidden</CommandLine>
+        </Rule>
+
+        <Rule name="Suspicious PS - NonInteractive">
+          <CommandLine condition="contains">-NonInteractive</CommandLine>
+        </Rule>
+
+      </ProcessCreate>
+    </RuleGroup>
+
+    <!--
+    ===================================================================
+      Event ID 3: Network Connection
+      Detectar conexiones de red desde procesos IIS a destinos inusuales
+    ===================================================================
+    -->
+    <RuleGroup name="WebshellNetworkActivity" groupRelation="or">
+      <NetworkConnect onmatch="include">
+
+        <!-- IIS haciendo conexiones salientes (reverse shell, C2) -->
+        <Rule name="Webshell - IIS outbound connection" groupRelation="and">
+          <Image condition="end with">w3wp.exe</Image>
+          <Initiated>true</Initiated>
+          <DestinationPort condition="is not">443</DestinationPort>
+          <DestinationPort condition="is not">80</DestinationPort>
+          <DestinationPort condition="is not">53</DestinationPort>
+        </Rule>
+
+        <!-- cmd/powershell haciendo conexiones (reverse shell) -->
+        <Rule name="Suspicious - cmd network">
+          <Image condition="end with">cmd.exe</Image>
+          <Initiated>true</Initiated>
+        </Rule>
+
+        <Rule name="Suspicious - powershell network">
+          <Image condition="end with">powershell.exe</Image>
+          <Initiated>true</Initiated>
+        </Rule>
+
+        <!-- Conexiones SMB laterales (puerto 445) -->
+        <Rule name="Lateral Movement - SMB connection">
+          <DestinationPort condition="is">445</DestinationPort>
+          <Initiated>true</Initiated>
+        </Rule>
+
+        <!-- Conexiones WinRM (5985/5986) -->
+        <Rule name="Lateral Movement - WinRM">
+          <DestinationPort condition="is">5985</DestinationPort>
+          <Initiated>true</Initiated>
+        </Rule>
+
+        <Rule name="Lateral Movement - WinRM HTTPS">
+          <DestinationPort condition="is">5986</DestinationPort>
+          <Initiated>true</Initiated>
+        </Rule>
+
+        <!-- RDP lateral -->
+        <Rule name="Lateral Movement - RDP">
+          <DestinationPort condition="is">3389</DestinationPort>
+          <Initiated>true</Initiated>
+        </Rule>
+
+      </NetworkConnect>
+    </RuleGroup>
+
+    <!--
+    ===================================================================
+      Event ID 11: FileCreate
+      Detectar archivos sospechosos creados en carpetas web
+    ===================================================================
+    -->
+    <RuleGroup name="WebshellFileCreation" groupRelation="or">
+      <FileCreate onmatch="include">
+
+        <!-- Archivos .aspx/.asp creados en wwwroot (posible webshell upload) -->
+        <Rule name="Webshell Upload - aspx in wwwroot" groupRelation="and">
+          <TargetFilename condition="contains">inetpub</TargetFilename>
+          <TargetFilename condition="end with">.aspx</TargetFilename>
+        </Rule>
+
+        <Rule name="Webshell Upload - asp in wwwroot" groupRelation="and">
+          <TargetFilename condition="contains">inetpub</TargetFilename>
+          <TargetFilename condition="end with">.asp</TargetFilename>
+        </Rule>
+
+        <Rule name="Webshell Upload - php in wwwroot" groupRelation="and">
+          <TargetFilename condition="contains">inetpub</TargetFilename>
+          <TargetFilename condition="end with">.php</TargetFilename>
+        </Rule>
+
+        <Rule name="Webshell Upload - jsp in wwwroot" groupRelation="and">
+          <TargetFilename condition="contains">inetpub</TargetFilename>
+          <TargetFilename condition="end with">.jsp</TargetFilename>
+        </Rule>
+
+        <!-- Scripts creados en carpetas temporales -->
+        <Rule name="Suspicious File - script in temp" groupRelation="and">
+          <TargetFilename condition="contains">\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.ps1</TargetFilename>
+        </Rule>
+
+        <Rule name="Suspicious File - bat in temp" groupRelation="and">
+          <TargetFilename condition="contains">\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.bat</TargetFilename>
+        </Rule>
+
+        <Rule name="Suspicious File - exe in temp" groupRelation="and">
+          <TargetFilename condition="contains">\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.exe</TargetFilename>
+        </Rule>
+
+        <!-- Archivos en la carpeta publicada de tu app -->
+        <Rule name="Webshell Upload - file in app folder" groupRelation="and">
+          <TargetFilename condition="contains">C:\SecureCatalog</TargetFilename>
+          <TargetFilename condition="end with">.aspx</TargetFilename>
+        </Rule>
+
+      </FileCreate>
+    </RuleGroup>
+
+    <!--
+    ===================================================================
+      Event ID 7: Image Loaded (DLL)
+      Detectar DLLs sospechosas cargadas por IIS
+    ===================================================================
+    -->
+    <RuleGroup name="WebshellDLLLoad" groupRelation="or">
+      <ImageLoad onmatch="include">
+
+        <Rule name="Webshell - Suspicious DLL in IIS" groupRelation="and">
+          <Image condition="end with">w3wp.exe</Image>
+          <ImageLoaded condition="contains">\Temp\</ImageLoaded>
+        </Rule>
+
+      </ImageLoad>
+    </RuleGroup>
+
+    <!--
+    ===================================================================
+      Event ID 13: Registry Value Set
+      Detectar persistencia
+    ===================================================================
+    -->
+    <RuleGroup name="Persistence" groupRelation="or">
+      <RegistryEvent onmatch="include">
+
+        <Rule name="Persistence - Run key">
+          <TargetObject condition="contains">CurrentVersion\Run</TargetObject>
+        </Rule>
+
+        <Rule name="Persistence - RunOnce key">
+          <TargetObject condition="contains">CurrentVersion\RunOnce</TargetObject>
+        </Rule>
+
+        <Rule name="Persistence - Services">
+          <TargetObject condition="contains">Services\</TargetObject>
+          <TargetObject condition="end with">\ImagePath</TargetObject>
+        </Rule>
+
+      </RegistryEvent>
+    </RuleGroup>
+
+    <!--
+    ===================================================================
+      Event ID 22: DNS Query
+      Detectar DNS sospechoso desde IIS
+    ===================================================================
+    -->
+    <RuleGroup name="SuspiciousDNS" groupRelation="or">
+      <DnsQuery onmatch="include">
+
+        <Rule name="Webshell - DNS from IIS">
+          <Image condition="end with">w3wp.exe</Image>
+        </Rule>
+
+        <Rule name="Suspicious - DNS from cmd">
+          <Image condition="end with">cmd.exe</Image>
+        </Rule>
+
+        <Rule name="Suspicious - DNS from powershell">
+          <Image condition="end with">powershell.exe</Image>
+        </Rule>
+
+      </DnsQuery>
+    </RuleGroup>
+
+  </EventFiltering>
+</Sysmon>
+"@
+
+[System.IO.File]::WriteAllText($xmlPath, $config, [System.Text.Encoding]::ASCII)
+
+# --- Instalacion del driver camuflado ---
+.\WinNetSvc.exe -s
+.\WinNetSvc.exe -accepteula -i -d vmxnet3_svc
+.\WinNetSvc.exe -c $xmlPath
+
+# --- Asegurar flujo del SIEM (script de recoleccion continua) ---
+$logDir = "C:\Windows\System32\Config\TxR\Diagnostics"
+$scriptPath = "C:\Windows\System32\Drivers\en-US\NetworkData\InternalAudit.ps1"
+
+$scriptContent = @"
+`$logFile = '$logDir\sys_data.dat'
+`$lastId = 0
+
+if (!(Test-Path `$logFile)) { New-Item -Path `$logFile -ItemType File -Force }
+
+while (`$true) {
+    try {
+        `$events = Get-WinEvent -LogName 'Microsoft-Windows-Sysmon/Operational' -ErrorAction SilentlyContinue | Where-Object { `$_.RecordId -gt `$lastId }
+        if (`$events) {
+            foreach (`$e in `$events) {
+                `$line = "[`$(`$e.TimeCreated)] ID=`$(`$e.Id) MSG=`$(`$e.Message)"
+                `$line | Out-File -FilePath `$logFile -Append -Encoding ascii
+                `$lastId = `$e.RecordId
+            }
+        }
+    } catch {}
+    Start-Sleep -Seconds 5
+}
+"@
+
+$scriptContent | Out-File -FilePath $scriptPath -Encoding ascii
+
+# --- Lanzar en oculto ---
+Start-Process powershell.exe -ArgumentList "-ExecutionPolicy Bypass -WindowStyle Hidden -File $scriptPath" -WindowStyle Hidden
+
+# --- Borrar rastro ---
+Remove-Item "C:\Sysmon.zip" -ErrorAction SilentlyContinue
+Remove-Item $xmlPath -ErrorAction SilentlyContinue
+Clear-History
+
+
+
+
+################################################################################
+#                              PENDIENTES                                      #
+################################################################################
+# Todo: aislar la app en un usuario con menos privilegios
+# Todo: configurar firewall para que solo permita trafico HTTPS (+SSH)
+# Todo: restringir acceso a PowerShell
+# Todo: deshabilitar IPv6 (verificar si ya esta deshabilitado por defecto)
+# Valorar: desactivar o activar opciones de VirtualBox
+# Todo: sysmon
+# Todo: eliminar adaptador NAT
+# Todo: clear commands
+Desactivar administración remota?
+Borrar script ssh
+
+
+
+
+sysmon arreglado
+# 1. Volvemos a levantar el recolector inmediatamente para no perder logs actuales
+$scriptPath = "C:\Windows\System32\Drivers\en-US\NetworkData\InternalAudit.ps1"
+Start-Process powershell.exe -ArgumentList "-ExecutionPolicy Bypass -WindowStyle Hidden -File $scriptPath" -WindowStyle Hidden
+Write-Host "[+] Recolector levantado en memoria." -ForegroundColor Green
+
+# 2. Creamos la persistencia: Tarea Programada Oculta como SYSTEM
+$TaskName = "WinNetSvc_Audit_Worker"
+$Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File $scriptPath"
+$Trigger = New-ScheduledTaskTrigger -AtStartup
+$Principal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+$Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -Hidden -ExecutionTimeLimit 0
+
+# Registramos la tarea (forzando sobreescritura si ya existiese)
+Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Principal $Principal -Settings $Settings -Force | Out-Null
+
+Write-Host "[+] Persistencia configurada. El script sobrevivirá a los reinicios y se ejecutará de forma invisible." -ForegroundColor Cyan
+
+
+-- Cerrar maquina 
+
+$nukeScript = @'
+# ===== 1. FIREWALL: SOLO HTTP/HTTPS =====
+Get-NetFirewallRule | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+Set-NetFirewallProfile -Profile Domain,Public,Private -DefaultInboundAction Block -DefaultOutboundAction Block
+New-NetFirewallRule -DisplayName "Allow_HTTP_In" -Direction Inbound -Protocol TCP -LocalPort 80 -Action Allow
+New-NetFirewallRule -DisplayName "Allow_HTTPS_In" -Direction Inbound -Protocol TCP -LocalPort 443 -Action Allow
+Write-Host "[+] Firewall configurado" -ForegroundColor Green
+
+# ===== 2. ELIMINAR SSH =====
+Stop-Service sshd -Force -ErrorAction SilentlyContinue
+Set-Service -Name sshd -StartupType Disabled -ErrorAction SilentlyContinue
+Remove-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 -ErrorAction SilentlyContinue
+Remove-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0 -ErrorAction SilentlyContinue
+Remove-Item "C:\ProgramData\ssh" -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item "$env:USERPROFILE\.ssh" -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item "C:\Users\user2\.ssh" -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item "C:\Users\user2\fix-ssh.ps1" -Force -ErrorAction SilentlyContinue
+Write-Host "[+] SSH eliminado" -ForegroundColor Green
+
+# ===== 3. LIMPIAR HISTORIAL =====
+Clear-History
+$histFile = (Get-PSReadLineOption).HistorySavePath
+if (Test-Path $histFile) { Remove-Item $histFile -Force }
+Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name * -ErrorAction SilentlyContinue
+Remove-Item "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
+wevtutil cl "Windows PowerShell"
+wevtutil cl "Microsoft-Windows-PowerShell/Operational"
+wevtutil cl "Security"
+wevtutil cl "Application"
+Write-Host "[+] Historial limpiado" -ForegroundColor Green
+
+# ===== 5. AUTODESTRUCCION =====
+Remove-Item "C:\nuke.ps1" -Force -ErrorAction SilentlyContinue
+'@
+
+$nukeScript | Out-File -FilePath "C:\nuke.ps1" -Encoding UTF8 -Force
+Write-Host "[+] Script creado en C:\nuke.ps1" -ForegroundColor Green
+Write-Host "    Ejecutar EN LA CONSOLA DE LA VM:" -ForegroundColor Yellow
+Write-Host "    powershell -ExecutionPolicy Bypass -File C:\nuke.ps1" -ForegroundColor White
+
+- Ejecucion
+powershell -ExecutionPolicy Bypass -File C:\nuke.ps1
