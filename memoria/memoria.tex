@@ -1,0 +1,82 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Preámbulo                                                                    %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\documentclass[11pt,a4paper,titlepage,oneside]{report}
+
+%%% RELACIÓN DE VARIABLES A PERSONALIZAR %%%
+\def\lingua{esp} % Se redacta la memoria en español
+
+\def\nome{Daniel Quintillán Quintillán y Álvaro Santiso Freire} % Autores
+\def\titulo{Práctica de abastionado.} % Título exacto solicitado
+
+% Titulación y mención (se conservan como variables del formato original)
+\def\titulacion{gei}
+\def\mencion{ENXEÑARÍA DO SOFTWARE}
+
+\def\renomearcadros{si} % Renombra "cuadros" a "tablas" en español
+
+\usepackage{estilo_tfg}
+
+% Lista de paquetes potencialmente interesantes (uso bajo demanda)
+\usepackage{longtable}   % permite construir tablas que ocupan más de una página
+\usepackage{multirow}    % permite crear celdas que ocupan varias filas de la misma tabla
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Corpo                                                                        %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\begin{document}
+
+ %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+ % Preliminares del documento           %
+ %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+ \include{portada/portada}
+ \dedicatoria{} % Dedicatoria vacía
+ \paxinaenbranco
+  \include{portada/resumo}
+
+ \pagenumbering{roman}
+ \setcounter{page}{1}
+ \bstctlcite{IEEEexample:BSTcontrol}
+
+ \tableofcontents
+ \listoffigures
+ \listoftables
+ \clearpage
+  
+ \pagenumbering{arabic}
+ \setcounter{page}{1}
+
+ %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+ % Capítulos                            %
+ %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+ \include{contido/introduccion_y_marco_operativo}
+ \include{contido/fase_0_desarrollo_agentico}
+ \include{contido/fase_1_despliegue_hardening}
+ \include{contido/fase_2_pentesting_ofensivo}
+ \include{contido/fase_3_analisis_forense}
+ \include{contido/fase_4_securizacion_reactiva}
+ \include{contido/evaluacion_final_sla}
+
+ %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+ % Apéndices, glosarios e bibliografía  %
+ %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+ \appendix
+ \appendixpage
+ \include{anexos/anexo_prompt}
+ \include{anexos/anexo_codigo}
+
+ \printglossary[type=\acronymtype,title=\nomeglosarioacronimos]
+ \printglossary[title=\nomeglosariotermos]
+
+ \bibliographystyle{IEEEtranN}
+ \bibliography{\bibconfig,bibliografia/bibliografia}
+ \clearpage
+  
+\end{document}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%

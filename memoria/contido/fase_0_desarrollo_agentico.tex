@@ -1,0 +1,26 @@
+\chapter[Fase 0: Desarrollo Agéntico y QA]{Fase 0: Desarrollo Agéntico y Aseguramiento de Calidad (QA)}
+\label{chap:fase_0_desarrollo_agentico}
+
+\section[Ingeniería de Prompts y Web CRUD]{Ingeniería de Prompts para la generación de la aplicación Web CRUD}
+\label{sec:ingenieria_prompts}
+
+Para la creación del activo digital a defender, se ha implementado un flujo de trabajo agéntico avanzado utilizando \textbf{GitHub Copilot}. La piedra angular de este proceso ha sido la creación y refinamiento de un \textit{Master Prompt}, diseñado para orquestar la arquitectura del sistema bajo el paradigma de \textit{Secure by Design}.
+
+El flujo agéntico se apoya en una serie de directrices especializadas almacenadas en el directorio \texttt{blue\_team\_app/prompts}, que actúan como base de conocimiento para la IA durante la generación de código:
+\begin{itemize}
+    \item \textbf{Dominio y Persistencia}: Definición del modelo de datos y base de datos (\texttt{domain.md}, \texttt{bd.md}).
+    \item \textbf{Lógica de Aplicación}: Implementación de \textit{endpoints} y gestión de permisos (\texttt{endpoints.md}, \texttt{permissions.md}).
+    \item \textbf{Seguridad y Auditoría}: Guías para prevenir ataques y realizar auditorías de código (\texttt{attacks.md}, \texttt{audit.md}).
+    \item \textbf{Infraestructura}: Scripts y configuraciones para el entorno de producción (\texttt{deployment.md}).
+\end{itemize}
+
+Esta metodología garantiza que cada componente del sistema no solo sea funcional, sino que sea generado con un contexto profundo sobre las amenazas potenciales identificadas en las fases de diseño.
+
+\section[Arquitectura de Roles (Admin/Cliente)]{Arquitectura de roles (Admin/Cliente)}
+\label{sec:arquitectura_roles}
+
+\section[Auditoría de Código (QA)]{Auditoría de Código (QA) y medidas Secure by Design implementadas}
+\label{sec:auditoria_codigo}
+
+\section[Mitigación de Alucinaciones de la IA]{Identificación y mitigación de alucinaciones inseguras introducidas por la IA}
+\label{sec:mitigacion_alucinaciones}

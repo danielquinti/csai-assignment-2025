@@ -1,0 +1,99 @@
+\chapter[Fase 1: Despliegue y Hardening]{Fase 1: Despliegue, Hardening y Defensa Preventiva}
+\label{chap:fase_1_despliegue_hardening}
+
+La fase de despliegue se enfocó en proveer una infraestructura segura desde su concepción, aplicando estrictamente el principio de Defensa en Profundidad y aislando los servicios de manera exhaustiva.
+
+\section[Arquitectura de la Infraestructura Web]{Arquitectura de la Infraestructura Web (Windows Server 2025, IIS/Apache, SQL Express, red Host-Only)}
+\label{sec:arquitectura_infraestructura}
+
+\subsection{Provisión de Infraestructura y Configuración de Red}
+El entorno se construyó sobre una máquina virtual de \textbf{Windows Server 2025} (Evaluation edition) utilizando VirtualBox. Las especificaciones de hardware consistieron en 4 GB de RAM, 2 vCPUs y un disco de 50 GB. A nivel de hipervisor, se activó la virtualización de hardware, habilitando \textbf{UEFI} y \textbf{Secure Boot} en la configuración de la placa base, un prerrequisito indispensable para la posterior configuración de cifrado mediante hardware virtual.
+
+La topología de red se diseñó bajo un modelo de red aislada (\textit{Host-Only}) con fines de aislamiento. Inicialmente, se empleó un adaptador NAT transitorio para la descarga de dependencias. La exposición final de la máquina se realizó sobre un adaptador secundario en modo \textbf{Red de Solo Anfitrión (Host-Only)}. 
+
+Se asignó de forma manual e imperativa \textbf{IP Estática} en el segmento de red de la práctica, deshabilitando DHCP. El direccionamiento se fijó en \texttt{192.168.56.10/24} mediante \textit{PowerShell} (\texttt{New-NetIPAddress}), asegurando que la máquina mantuviese una ubicación controlada y conocida en el segmento de evaluación.
+
+\begin{verbatim}
+# Identificar adaptador Host-Only y fijar IP estática
+Get-NetAdapter | Format-Table Name, InterfaceIndex, Status -AutoSize
+New-NetIPAddress -InterfaceIndex 4 -IPAddress 192.168.56.10 -PrefixLength 24
+\end{verbatim}
+
+Para permitir una administración remota cifrada y trazable durante el aprovisionamiento, se habilitó el servicio OpenSSH Server (\texttt{sshd}), se permitió el tráfico entrante en el puerto TCP 22 en el Firewall de Windows, y se reconfiguró \texttt{sshd\_config} para utilizar PowerShell como la shell por defecto. Esto mitigó los problemas de elevación de privilegios de sesiones remotas mediante la supresión de directivas restrictivas de entorno para el grupo local de administradores (\texttt{ForceCommand}).
+
+\subsection{Configuración de la Pila Tecnológica (Web \& SQL)}
+La infraestructura de la aplicación \textit{SecureCatalog} requiere un ecosistema integrado por .NET 8, IIS y SQL Server.
+\begin{itemize}
+    \item \textbf{Gestor Web (IIS) y .NET}: Se instaló el rol \texttt{Web-Server} y el \textit{ASP.NET Core Hosting Bundle} (v8.0) para la interconexión entre el \textit{worker process} (\texttt{w3wp.exe}) de IIS y la aplicación en ejecución (\textit{Out-of-process}).
+    \item \textbf{Gestor de Base de Datos}: Se instaló \textbf{SQL Server Express} en modo silencioso. Por seguridad de ejecución, los servicios se lanzaron atados a la cuenta restringida \texttt{NT AUTHORITY\textbackslash Network Service}. Se prescindió de los Named Pipes deshabilitándolos y forzando conectividad exclusiva local por TCP (\texttt{TCPENABLED=1 /NPENABLED=0}).
+    \item \textbf{Conectividad Local a BD}: Se configuró la conexión a la base de datos sin persistir credenciales (\textit{Passwordless}) en código o \texttt{appsettings.json}, empleando el paradigma \textit{Integrated Security=True} y variables de entorno a nivel de sistema máquina (\texttt{ConnectionStrings\_\_DefaultConnection}).
+\end{itemize}
+
+\begin{verbatim}
+# Instalación silenciosa de SQL Server Express atada a Network Service
+& "$env:TEMP\SQLEXPR_x64_ENU.exe" /Q /ACTION=Install /IACCEPTSQLSERVERLICENSETERMS \
+  /FEATURES=SQLEngine /INSTANCENAME=SQLEXPRESS /SQLSVCACCOUNT="NT AUTHORITY\Network Service" \
+  /SQLSYSADMINACCOUNTS="BUILTIN\Administrators" /TCPENABLED=1 /NPENABLED=0 /UPDATEENABLED=0
+\end{verbatim}
+
+\subsection{Aislamiento y Despliegue de la Aplicación}
+Se eliminó la configuración por defecto de IIS borrando el \textit{Default Web Site} para prevenir la exposición de \textit{banners} y páginas iniciales conocidas. El despliegue de \textit{SecureCatalog} se configuró para ejecutarse bajo su propio \textit{Application Pool} dedicado (\texttt{SecureCatalogPool}), inicializado sin soporte para código .NET legado (\texttt{managedRuntimeVersion=""}).
+
+\begin{itemize}
+    \item \textbf{Certificados y Criptografía en Tránsito}: Se emitió un certificado autofirmado con longitud de clave RSA de 2048-bit válido para dos años y nombre DNS correspondiente al entorno. Dicho certificado se vinculó perimetralmente (\textit{Binding}) al puerto 443 (\texttt{netsh http add sslcert}) obligando al uso de \textbf{HTTPS}.
+    \item \textbf{Permisos del Sistema de Archivos}: Se reiniciaron los derechos heredados (ACLs) perimetrales y se aplicó la regla de Mínimo Privilegio. Se otorgó provisión estricta de Lectura/Ejecución (\texttt{RX}) al \textit{Application Pool Identity} en la carpeta principal, permitiendo únicamente modificación (\texttt{M}) para la capa de \textit{Data Protection API (DPAPI)} en su directorio aislado (\texttt{Keys}).
+    \item \textbf{Control de Acceso a BDD}: Se aprovisionó acceso sobre el DBMS a la identidad del IIS (\texttt{IIS AppPool\textbackslash SecureCatalogPool}), concediéndole privilegios \texttt{db\_owner} en modo transitorio para la ejecución inicial de migraciones Entity Framework DDL.
+\end{itemize}
+
+Se establecieron dependencias funcionales de sistema mediante \texttt{sc config}, enlazando el arranque del servicio web \texttt{W3SVC} a la correcta disponibilidad técnica del motor relacional \texttt{MSSQL\$SQLEXPRESS}. Se activó a su vez la directiva \texttt{startMode="AlwaysRunning"} a nivel de App Pool para pre-calentar los \textit{workers}, eliminando los \textit{cold-starts}.
+
+\section[Hardening Físico y Lógico]{Hardening Físico y Lógico}
+\label{sec:hardening_fisico_logico}
+
+\subsection[Cifrado BitLocker y BIOS/EFI]{Cifrado con BitLocker (TPM virtual) y contraseñas de BIOS/EFI}
+\label{subsec:cifrado_bitlocker}
+Como medida de seguridad defensiva, orientada a proteger la confidencialidad frente a exfiltración de discos virtuales (.vdi) y ataques de \textit{Evil Maid}, se implementó \textbf{BitLocker Drive Encryption}.
+
+El cifrado del volumen raíz (\texttt{C:}) se obligó mediante el algoritmo fuerte \textbf{AES-256}. En el hipervisor se aprovisionó una interfaz de \textbf{vTPM 2.0} (Virtual Trusted Platform Module), lo que permitió configurar BitLocker con un protector TPM principal, forzando a la máquina a requerir un entorno de virtualización que posea dicho TPM inyectado criptográficamente para poder arrancar, impidiendo montajes forzados offline en otros sistemas.
+
+\subsection[Configuración de Firewall Perimetral]{Configuración de Firewall perimetral}
+\label{subsec:configuracion_firewall}
+
+\subsubsection{Aseguramiento de Identidades Convencionales}
+El bastionado comenzó por la supresión de las visualizaciones por defecto (\texttt{AutoAdminLogon=0}, deshabilitación del \textit{Last Username}) y la imposición de una estricta \textbf{política de bloqueo de cuentas} (lockout) de 10 intentos con ventana de enfriamiento de 15 minutos, deteniendo ataques de fuerza bruta nativos. La cuenta genuina de \texttt{Administrador} fue camuflada bajo el alias \texttt{user2}, mientras que la cuenta \texttt{Invitado} mutó a \texttt{user3} y quedó suspendida en el activo.
+
+\subsubsection{Estrategia de Decepción (Honeytokens)}
+Para detectar operaciones subrepticias de movimiento lateral y recolección de credenciales, se implementó una estrategia de decepción (\textit{deception}). Se aprovisionó un usuario señuelo (\textit{Honeytoken}) identificado como \texttt{Administrador}, blindado mediante la asignación de restricciones absolutas en el modelo de Políticas de Seguridad Locales (\textit{Local Security Policy}). 
+
+Utilizando herramientas a bajo nivel (\texttt{secedit}), se le negaron los derechos de \textit{Interactive Logon} y \textit{Network Logon}. De la misma forma, mediante listas de control de acceso (\texttt{icacls}), se le denegó explicitamente lectura y ejecución (\texttt{Deny FullControl}) en todo el volumen de almacenamiento. Si un adversario robara este token, no tendría acceso persistente, pero disiparía alarmas operacionales silentes hacia nuestro nodo de monitorización.
+
+\subsubsection{Reducción de Superficie de Ataque y Bastionado de Red}
+Se procedió a la reducción de servicios innecesarios bloqueando la comunicación general (Default-Deny \textit{Inbound}/\textit{Outbound}) en el \textit{Windows Defender Firewall}, permitiendo únicamente el tráfico de los puertos lógicos empresariales explícitos HTTP (80) y HTTPS (443). El servicio de administración \texttt{sshd} fue deshabilitado tras el aprovisionamiento original.
+
+A nivel de red, se ejecutaron disrupciones orientadas sobre el stack estándar IPv6 para mitigar vectores de ataque (\texttt{ms\_tcpip6}), mitigando el componente \textbf{IPv6} desde el \textit{NetAdapterBinding}. Adicionalmente, el ecosistema de resoluciones de \textbf{NetBIOS} (\texttt{NBT-NS}) fue neutralizado localmente editando el \textit{Registry} en profundidad (\texttt{NetbiosOptions=2}).
+
+Se deshabilitaron e interrumpieron más de diez servicios nativos susceptibles de abuso remoto o que facilitan la evasión de telemetría: \texttt{LanmanServer} (SMB, truncando vectores \textit{Pass-the-Hash}), \texttt{WinRM}, \texttt{RemoteRegistry}, \texttt{TermService} (RDP), spoolers nativos, así como recolectores de inteligencia internos de la plataforma (\texttt{DiagTrack}, \texttt{UALSVC}, Telemetría SQL).
+
+\subsubsection{Táctica Defensiva de Restricción de Binarios (LOLBins Neutralization)}
+Con el objetivo de dificultar las fases de intrusión y exfiltración, se implementó una restricción sobre las herramientas nativas del sistema operativo o \textit{Living Off the Land Binaries} (LOLBins). Un script defensivo modificó la titularidad (\texttt{takeown}) y los privilegios (\texttt{icacls}) de más de treinta utilidades ejecutables desde la interfaz de línea de comandos de Windows. Comandos frecuentemente empleados por atacantes para la descarga y ejecución de cargas útiles como \texttt{certutil.exe}, \texttt{curl.exe}, \texttt{bitsadmin.exe}, \texttt{ftp.exe}, \texttt{mshta.exe}, \texttt{wmic.exe} o \texttt{msbuild.exe} vieron modificados sus permisos y su extensión en el sistema de archivos (ej. convirtiendo a \texttt{.bak}).
+
+\begin{verbatim}
+# Bucle de neutralización de LOLBins
+foreach ($bin in $lolbins) {
+    if (Test-Path $bin) {
+        takeown /F $bin /A | Out-Null
+        icacls $bin /grant Administrators:F | Out-Null
+        Rename-Item -Path $bin -NewName "$bin.bak" -Force
+    }
+}
+\end{verbatim}
+
+\section[Monitorización mediante Wazuh/Sysmon]{Monitorización y Detección Temprana mediante Wazuh o Sysmon}
+\label{sec:monitorizacion_deteccion}
+En preparación para la fase evaluativa forense y disuasiva, se incrustó el componente base \textbf{Sysmon} (\textit{System Monitor}) como sensor \textit{on-host}. Para prevenir la detección automatizada por parte de los atacantes, los binarios del agente de monitorización se instalaron en el directorio no estándar \texttt{C:\textbackslash Windows\textbackslash System32\textbackslash Drivers\textbackslash en-US\textbackslash NetworkData}, y el binario principal fue renombrado a \texttt{WinNetSvc.exe}.
+
+El sensor operativo fue desplegado junto con un esquema XML rigurosamente auditado para reaccionar sobre ejecuciones irregulares:
+\begin{itemize}
+    \item \textbf{Caza de \textit{Webshells} y RCE}: Se trazaron flujos relacionales estrictos (\texttt{EventID 1}) para procesar ejecuciones hiladas desde perfiles web (\texttt{w3wp.exe}), identificando inmediatamente si el proceso de IIS invoca un CMD, PowerShell, localizadores de infraestructura (como \texttt{whoami}, \texttt{net1}, \texttt{ipconfig}) o binarios neutralizados a fin de eludir la Tierra Quemada.
+    \item \textbf{Escalamiento y Movimientos Silentes}: Excepciones de caza a flujos paralelos originados por herramientas de inyección remanentes.
+\end{itemize}

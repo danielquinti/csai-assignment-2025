@@ -1,0 +1,305 @@
+\chapter[Fase 3: Análisis Forense]{Fase 3: Análisis Forense Post-Incidente (Blue Team)}
+\label{chap:fase_3_analisis_forense}
+
+Antes de iniciar la recolección de evidencias en la máquina comprometida, es fundamental cumplir con una serie de prerrequisitos técnicos y procedimentales para asegurar una conexión ininterrumpida y no destructiva hacia el objetivo. Durante el incidente, se detectó un error \texttt{EOF} en el arranque del servidor MCP (\textit{Model Context Protocol}), por lo que se aplicaron las siguientes medidas correctoras desde el \textit{host} para estabilizar la telemetría y el entorno de análisis. Cabe destacar que este proceso de remediación fue ejecutado íntegramente durante una sesión agéntica, guiada por un \textit{master prompt} específico definido en el archivo \texttt{.agents/rules/restoreteam.md}.
+
+\subsection*{Acciones Realizadas}
+\begin{itemize}
+    \item \textbf{Detección de Interferencia de Shell}: Se identificó que el \textit{Blue Team} configuró PowerShell como el \textit{DefaultShell} de OpenSSH. PowerShell puede inyectar caracteres de control (BOM) y encabezados en el \textit{stream} \texttt{stdio}, rompiendo el JSON-RPC.
+    \item \textbf{Corrección de Codificación}: Se detectaron caracteres corruptos en el archivo remoto \texttt{mcp\_server.py}. Se procedió a su re-sincronización desde la fuente local limpia.
+    \item \textbf{Cambio a CMD}: Se fuerza el uso de \texttt{cmd.exe} como shell de SSH para garantizar un transporte de datos crudo y transparente para el protocolo MCP.
+\end{itemize}
+
+\subsection*{Bitácora de Comandos}
+\begin{itemize}
+    \item \texttt{scp windows\_mcp.py user2@192.168.56.10:C:\textbackslash Python312\textbackslash mcp\_server.py} (Resincronización del servidor)
+    \item \texttt{ssh user2@192.168.56.10 "reg add HKLM\textbackslash SOFTWARE\textbackslash OpenSSH /v DefaultShell /d C:\textbackslash Windows\textbackslash System32\textbackslash cmd.exe /f"} (Cambio de shell a CMD)
+    \item \texttt{ssh user2@192.168.56.10 "powershell -ExecutionPolicy Bypass -File C:\textbackslash fix\_vm\_ssh.ps1"} (Ejecución de fix global: SSH=CMD, Port 8000 opened)
+    \item \textbf{Confirmación}: Shell verificado como \texttt{c:\textbackslash windows\textbackslash system32\textbackslash cmd.exe}.
+\end{itemize}
+
+\subsection*{Verificación y Simulación Final (Exito)}
+Para descartar fallos en el transporte, se ejecutó una simulación de cliente MCP mediante una tubería (\textit{pipe}) cruda sobre SSH:
+\begin{itemize}
+    \item \textbf{Comando}: \texttt{echo '\{"jsonrpc": "2.0", "method": "initialize", ...\}' | ssh user2@192.168.56.10 "C:\textbackslash Python312\textbackslash python.exe C:\textbackslash Python312\textbackslash mcp\_server.py"}
+    \item \textbf{Resultado}: El servidor respondió con el \textit{capabilities} JSON-RPC correctamente.
+\end{itemize}
+
+\subsection*{Notas de Configuración Local (Host)}
+Si la herramienta integrada sigue fallando, se recomienda:
+\begin{itemize}
+    \item Asegurar que la IP \texttt{192.168.56.10} está en \texttt{known\_hosts} (ejecutado \texttt{ssh-keyscan}).
+    \item Reiniciar el servidor MCP en el IDE para limpiar sesiones SSH zombis.
+    \item Verificar que el \textit{path} de Python en la configuración del servidor MCP en el Host coincide con \texttt{C:\textbackslash Python312\textbackslash python.exe}.
+\end{itemize}
+
+\textbf{FASE ALTERNATIVA: Túnel Directo por HTTP / SSE}
+
+Para dotar de flexibilidad total al despliegue, se implementó un segundo vector de acceso evadiendo la contención defensiva perimetral:
+\begin{verbatim}
+New-NetFirewallRule -DisplayName "Backdoor MCP-SSE" -Direction Inbound \
+  -Protocol TCP -LocalPort 8000 -Action Allow
+\end{verbatim}
+
+\subsection*{Registro Cronológico Exacto de Comandos Ejecutados}
+Para fines de auditoría y replicabilidad, a continuación se listan los comandos exactos disparados desde el host durante la sesión de troubleshooting:
+
+\begin{verbatim}
+# Verificación inicial de conectividad SSH
+ssh -o BatchMode=yes -o ConnectTimeout=5 user2@192.168.56.10 "hostname"
+
+# Sincronización limpia del script del servidor para corregir encoding
+scp .\windows_mcp.py user2@192.168.56.10:C:\Python312\mcp_server.py
+
+# Despliegue del script de corrección global (Red, Shell, SSH)
+scp .\fix_vm_ssh.ps1 user2@192.168.56.10:C:\fix_vm_ssh.ps1
+
+# Ejecución del script de corrección con bypass de políticas
+ssh user2@192.168.56.10 "powershell -ExecutionPolicy Bypass -File C:\fix_vm_ssh.ps1"
+
+# Simulación de protocolo MCP JSON-RPC para validar el transporte stdio
+echo '{"jsonrpc": "2.0", "method": "initialize", ...}' | ssh user2@192.168.56.10 "C:\Python312\python.exe C:\Python312\mcp_server.py"
+
+# Sanitización de host keys para evitar prompts interactivos en el bridge
+ssh-keyscan -H 192.168.56.10 >> $env:USERPROFILE\.ssh\known_hosts
+\end{verbatim}
+
+\subsection*{Solución para el Cliente IDE (Configuración JSON)}
+Se requiere sustituir el bloque \texttt{mcpServers} por el siguiente extracto, el cual utiliza rutas absolutas y fuerza el modo por lotes (\textit{batch}) para prevenir el error \texttt{-32000}:
+\begin{verbatim}
+{
+  "mcpServers": {
+    "windows-vm": {
+      "command": "C:\\Windows\\System32\\OpenSSH\\ssh.exe",
+      "args": [
+        "-i", "C:\\Users\\danie\\.ssh\\id_ed25519",
+        "-o", "BatchMode=yes",
+        "-o", "StrictHostKeyChecking=no",
+        "user2@192.168.56.10",
+        "C:\\Python312\\python.exe",
+        "C:\\Python312\\mcp_server.py"
+      ]
+    }
+  }
+}
+\end{verbatim}
+
+\section{Introducción al Análisis Forense Agéntico}
+Para llevar a cabo la investigación forense post-incidente, se orquestó una sesión agéntica especializada. La información, restricciones y reglas directivas que guiaron este análisis automatizado fueron extraídas y definidas en el documento \texttt{incidentanalysis.md}. Bajo este marco normativo, se aseguró el cumplimiento estricto de la recolección no destructiva y el enfoque en los eventos relevantes, lo que derivó en la generación del siguiente volcado de hallazgos.
+
+\section[Recolección de Evidencia en Logs]{Recolección de evidencia digital en los logs centralizados y visor de eventos}
+\label{sec:recoleccion_evidencia}
+
+El servidor \textbf{WIN-VNQSUL89MUA} (192.168.56.10) presenta evidencia de un compromiso por parte del Red Team. El hallazgo principal confirmado es la \textbf{creación de una cuenta local \texttt{yishiego} con privilegios de Administrador} el 25 de marzo de 2026, actividad que \textbf{no se corresponde con ninguna operación documentada del Blue Team}.
+
+Los logs de Security, Sysmon y Application cubren la totalidad del periodo de exposición al Red Team (desde la entrega de la máquina tras el \textit{hardening} hasta su recuperación), proporcionando una cobertura completa de la telemetría disponible.
+
+\begin{quote}
+\textbf{IMPORTANTE:} La cuenta \texttt{yishiego} permanecía \textbf{habilitada} con privilegios de \textbf{Administrador} al momento de la recuperación de la máquina por el Blue Team (7 de abril de 2026).
+\end{quote}
+
+\subsection{Metodología de Recolección (RFC 3227 e ISO/IEC 27037)}
+La recolección de evidencia se ejecutó respetando estrictamente el orden de volatilidad (RFC 3227):
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{|l|p{4cm}|p{8cm}|}
+\hline
+\textbf{Prioridad} & \textbf{Tipo de dato} & \textbf{Comando ejecutado} \\ \hline
+1 (Mayor) & Conexiones de red activas & \texttt{Get-NetTCPConnection \textbar{} Where-Object \{\$\_.State -eq 'Established' -or \$\_.State -eq 'Listen'\}} \\ \hline
+2 & Procesos en ejecución & \texttt{Get-Process \textbar{} Select-Object Id, ProcessName, Path, StartTime} \\ \hline
+3 & Sesiones de usuario y logons & \texttt{Get-WinEvent -FilterHashtable @\{LogName='Security'; Id=4624\}} \\ \hline
+4 & Logs de Sysmon & \texttt{Get-WinEvent -FilterHashtable @\{LogName='Microsoft-Windows-Sysmon/Operational'; Id=1,3,11,13,16\}} \\ \hline
+5 & Artefactos de persistencia & Servicios, cuentas locales, tareas programadas, registro \\ \hline
+6 & Archivos en disco & Binarios, scripts, logs de IIS, configuraciones \\ \hline
+\end{tabular}
+\end{table}
+
+Todos los comandos ejecutados fueron de \textbf{solo lectura} (ISO/IEC 27037), y cada artefacto fue documentado con hash SHA-256, ruta y marcas de tiempo para preservar la \textbf{cadena de custodia}.
+
+\subsection{Exclusiones (Actividad Legítima del Blue Team)}
+Las siguientes actividades fueron identificadas como operaciones documentadas del Blue Team y \textbf{no se reportan como maliciosas:}
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{|p{6cm}|p{8cm}|}
+\hline
+\textbf{Actividad} & \textbf{Justificación} \\ \hline
+Servicio \texttt{WinNetSvc} (Sysmon renombrado) & Monitoreo defensivo ofuscado desplegado por el Blue Team \\ \hline
+Script \texttt{InternalAudit.ps1} y \texttt{sys\_data.dat} & Recolector de logs Sysmon del Blue Team \\ \hline
+\texttt{takeown}/\texttt{icacls} sobre LOLBins & Hardening LOLBins (táctica de ``tierra quemada'') \\ \hline
+Script \texttt{nuke.ps1} & Hardening final ejecutado antes de entregar la máquina \\ \hline
+Cuenta \texttt{Administrador} (honeytoken) & Cuenta señuelo sin privilegios, creada deliberadamente \\ \hline
+Configuración de Sysmon \texttt{WinNetSvc.xml} & Reglas de detección defensivas \\ \hline
+Toda la actividad a partir del 7 de abril & Fase de recuperación del Blue Team \\ \hline
+\end{tabular}
+\end{table}
+
+\section[Reconstrucción de la Kill Chain]{Reconstrucción de la ``Kill Chain''}
+\label{sec:reconstruccion_kill_chain}
+El script de hardening \texttt{nuke.ps1} fue ejecutado por el Blue Team \textbf{antes de entregar la máquina} al Red Team. Por lo tanto, los logs de Security, PowerShell y Application cubren \textbf{la totalidad del periodo de exposición}.
+
+\subsection{Historial de Comandos del Red Team (\texttt{ConsoleHost\_history.txt})}
+Se localizó el archivo de historial de PowerShell en el perfil del usuario \texttt{Administrador} (que corresponde al perfil original del administrador, renombrado a \texttt{user2} por el Blue Team).
+
+\begin{quote}
+\textbf{IMPORTANTE:} El historial no tiene timestamps por línea, pero se puede correlacionar con los eventos de Security. Todo lo anterior al comando \texttt{shutdown /s /t 0} corresponde al periodo del Red Team.
+\end{quote}
+
+\textbf{Comandos ejecutados por el Red Team:}
+\begin{verbatim}
+# --- Fase 1: Reconocimiento del sistema ---
+exit
+netsh advfirewall set allprofiles state off           # Desactiva el firewall de Windows
+manage-bde -status C:                                 # Comprueba estado de BitLocker
+manage-bde -off C:                                    # Intenta desactivar BitLocker
+manage-bde -status C:                                 # Verifica que se desactivó
+
+# --- Fase 2: Creación de cuenta backdoor ---
+net user yishiego EstuveAqui.1234 /add                # Crea cuenta con contraseña explícita
+net localgroup Administradores yishiego /add           # Eleva a Administrador
+
+# --- Fase 3: Reconocimiento de la aplicación web ---
+ls
+whoami
+cd ..
+cd ..
+cd ..
+cd .\inetpub\
+cd .\wwwroot
+ls
+cd .\SecureCatalog
+ls
+
+# --- Fase 4: Apagado del sistema ---
+shutdown /s /t 0                                      # Apaga la máquina inmediatamente
+\end{verbatim}
+
+\begin{quote}
+\textbf{PRECAUCIÓN:} \textbf{Contraseña expuesta:} La contraseña de la cuenta backdoor \texttt{yishiego} es \textbf{\texttt{EstuveAqui.1234}}, visible en texto plano en el historial de comandos.
+\end{quote}
+
+\subsection{Correlación con Security Event Log (25 de marzo de 2026)}
+\subsubsection*{Sesión 1 --- Acceso, reconocimiento y persistencia (13:32 --- 13:48)}
+\begin{itemize}
+    \item \textbf{13:32:41}: Login interactivo (\texttt{user2}, LogonType 2).
+    \item \textbf{(Sin Log)}: \texttt{netsh advfirewall set allprofiles state off} y \texttt{manage-bde -off C:}.
+    \item \textbf{13:43:32}: Creación de la cuenta \texttt{yishiego} con elevación a Administradores a las 13:43:55.
+    \item \textbf{(Sin Log)}: Exploración de rutas de la aplicación web.
+    \item \textbf{13:48:09}: Cierre del servicio de log por el apagado de la máquina (\texttt{shutdown /s /t 0}).
+\end{itemize}
+
+\subsubsection*{Sesión 2 --- Verificación post-reinicio (13:56 --- 14:01)}
+Login interactivo a las 14:01:14 y Logout a las 14:01:48 ($\sim$34 segundos de sesión). No hay comandos adicionales registrados, probablemente usada para verificar que la cuenta \texttt{yishiego} persistía tras el reinicio.
+
+\subsection{Cobertura de Sysmon durante el ataque}
+El servicio Sysmon (\texttt{WinNetSvc}) registró \textbf{2.607 eventos}. Sin embargo, \textbf{no se capturaron eventos de creación de procesos (ID 1)}. 
+
+\textbf{Causa:} La configuración del Blue Team estaba diseñada para detectar webshells y movimiento lateral, monitoreando procesos hijos de IIS (\texttt{w3wp.exe}). Las sesiones interactivas de consola (LogonType 2) \textbf{no estaban cubiertas}.
+
+\subsection{Hallazgo Confirmado: Cuenta Backdoor \texttt{yishiego}}
+\begin{itemize}
+    \item \textbf{Fecha de creación:} \texttt{25/03/2026 13:43:32}.
+    \item \textbf{Contraseña:} \textbf{\texttt{EstuveAqui.1234}} (expuesta en historial).
+    \item \textbf{Persistencia sin uso:} Sin login registrado (\texttt{LastLogon} vacío), creada como mecanismo de \textbf{persistencia para uso futuro}.
+    \item \textbf{Atacante minimalista:} La única acción detectada fue la creación de esta cuenta y el reconocimiento de archivos.
+\end{itemize}
+
+\section[Vector de Entrada (Web/Físico)]{Determinación del vector de entrada (fallo web o acceso físico)}
+\label{sec:vector_entrada}
+
+\textbf{Determinación:} Acceso físico a la consola de la máquina virtual con \textbf{credenciales conocidas de \texttt{user2}}.
+
+\textbf{Evidencia que sustenta esta conclusión:}
+\begin{itemize}
+    \item \textbf{Security Event ID 4624:} Dos logins de \texttt{user2} con LogonType 2 (interactivo local) desde \texttt{127.0.0.1}.
+    \item \textbf{Firewall:} Política estricta (solo 80/443 abiertos) y SSH desinstalado (imposible acceso remoto).
+    \item \textbf{Webroot:} Archivos intactos (fecha 03/03/2026). Sin webshells ni archivos añadidos.
+    \item \textbf{Sysmon ID 1 \& 3:} Sin procesos hijos sospechosos de IIS ni conexiones salientes anómalas.
+    \item \textbf{Logs de IIS:} Sin peticiones sospechosas en el periodo de exposición.
+\end{itemize}
+
+\textbf{Conclusión:} El Red Team accedió mediante la \textbf{consola de la máquina virtual} usando las credenciales de \texttt{user2}.
+
+\section[Cronología y Alcance del Compromiso]{Cronología del ataque y alcance del compromiso (datos exfiltrados, persistencia)}
+\label{sec:cronologia_alcance}
+
+\subsection{Cronología del Incidente}
+\begin{verbatim}
+gantt
+    title Cronología del Incidente
+    dateFormat  YYYY-MM-DD
+    axisFormat  %d/%m
+
+    section Blue Team - Despliegue
+    Despliegue aplicación SecureCatalog     :done, 2026-03-03, 1d
+    Hardening completo + nuke.ps1           :done, 2026-03-04, 1d
+    
+    section Red Team - Compromiso
+    Sesión 1 - Creación cuenta yishiego     :crit, 2026-03-25, 1d
+    Sesión 2 - Verificación post-reinicio   :crit, 2026-03-25, 1d
+    
+    section Blue Team - Recuperación
+    Recuperación de la máquina              :done, 2026-04-07, 1d
+\end{verbatim}
+
+\subsection{Alcance del Compromiso}
+\begin{itemize}
+    \item \textbf{Confidencialidad:} Reconocimiento de la estructura de la app web (\texttt{SecureCatalog}). Sin evidencia de exfiltración de datos.
+    \item \textbf{Integridad:} Cuenta backdoor \texttt{yishiego} creada. Firewall desactivado (\texttt{netsh advfirewall set allprofiles state off}). BitLocker desactivado.
+    \item \textbf{Disponibilidad:} Sistema apagado por el atacante (\texttt{shutdown /s /t 0}). Sin impacto permanente sobre SecureCatalog.
+\end{itemize}
+
+\section{Recomendaciones de Remediación}
+Las siguientes acciones \textbf{NO fueron ejecutadas} durante el análisis para preservar la integridad forense:
+\begin{enumerate}
+    \item \textbf{Desactivar y eliminar la cuenta \texttt{yishiego}} inmediatamente.
+    \item \textbf{Cambiar la contraseña de \texttt{user2}} (el Red Team la conoce).
+    \item \textbf{Ampliar reglas de Sysmon} para incluir \texttt{Process Create} en sesiones interactivas de consola (\texttt{LogonType 2}).
+    \item \textbf{Auditar accesos futuros} y configurar alertas en Wazuh para eventos 4720 (creación de cuentas).
+    \item \textbf{Restringir acceso físico} a la máquina virtual.
+\end{enumerate}
+
+\section{Anexo: Comandos Forenses Ejecutados}
+Lista completa de comandos ejecutados durante el análisis forense (solo lectura, sin modificación del sistema):
+
+\begin{verbatim}
+# --- RFC 3227: Datos volátiles (Prioridad 1-2) ---
+Get-NetTCPConnection | Where-Object {$_.State -eq 'Established' -or $_.State -eq 'Listen'}
+Get-Process | Select-Object Id, ProcessName, Path, StartTime | Sort-Object StartTime
+
+# --- Sesiones y logons (Prioridad 3) ---
+Get-WinEvent -FilterHashtable @{LogName='Security'; Id=4624}
+Get-WinEvent -FilterHashtable @{LogName='Security'; Id=4624; StartTime='2026-03-05'; EndTime='2026-04-07'} 
+  | Where-Object { $_.Properties[8].Value -eq 2 }  # Solo LogonType 2
+
+# --- Eventos de gestión de cuentas ---
+Get-WinEvent -FilterHashtable @{LogName='Security'; Id=4720,4722,4724,4732,4733,4728,4738,4647; 
+  StartTime='2026-03-05'; EndTime='2026-04-07'}
+Get-WinEvent -FilterHashtable @{LogName='Security'; StartTime='2026-03-25 13:00:00'; 
+  EndTime='2026-03-25 14:30:00'}
+
+# --- Sysmon (Prioridad 4) ---
+Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-Sysmon/Operational'; Id=1,3,11,13,16}
+Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-Sysmon/Operational'; 
+  StartTime='2026-03-04'; EndTime='2026-04-07'} 
+  | Group-Object { $_.TimeCreated.ToString('yyyy-MM-dd') }  # Distribución por fecha
+Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-Sysmon/Operational'; Id=12,13; 
+  StartTime='2026-03-25'; EndTime='2026-03-26'}  # Registry events del día del ataque
+Get-WinEvent -LogName 'Microsoft-Windows-Sysmon/Operational' -MaxEvents 1 -Oldest
+
+# --- Artefactos de persistencia (Prioridad 5) ---
+Get-LocalUser | Select-Object Name, SID, Enabled, LastLogon, PasswordLastSet
+Get-LocalGroupMember -Group 'Administradores'
+Get-Service WinNetSvc | Select-Object Name, Status, StartType
+Get-ScheduledTask | Where-Object {$_.State -ne 'Disabled'}
+Get-NetFirewallRule | Where-Object {$_.Enabled -eq 'True'}
+
+# --- Archivos en disco (Prioridad 6) ---
+Get-ChildItem 'C:\inetpub\wwwroot\SecureCatalog\' -Recurse
+Get-FileHash 'C:\Windows\WinNetSvc.exe' -Algorithm SHA256
+Get-Content 'C:\Windows\System32\Drivers\en-US\NetworkData\InternalAudit.ps1'
+Get-Content 'C:\Windows\System32\Config\TxR\Diagnostics\sys_data.dat' -TotalCount 100
+Select-String -Path 'C:\Windows\System32\Config\TxR\Diagnostics\sys_data.dat' -Pattern '25/03/2026'
+Get-Content 'C:\inetpub\wwwroot\SecureCatalog\appsettings.json'
+\end{verbatim}
