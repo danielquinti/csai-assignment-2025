@@ -6,21 +6,31 @@
 
 Para la creación del activo digital a defender, se ha implementado un flujo de trabajo agéntico avanzado utilizando \textbf{GitHub Copilot}. La piedra angular de este proceso ha sido la creación y refinamiento de un \textit{Master Prompt}, diseñado para orquestar la arquitectura del sistema bajo el paradigma de \textit{Secure by Design}.
 
-El flujo agéntico se apoya en una serie de directrices especializadas almacenadas en el directorio \texttt{blue\_team\_app/prompts}, que actúan como base de conocimiento para la IA durante la generación de código:
+El flujo agéntico se apoya en una serie de directrices especializadas almacenadas en el directorio \texttt{blue\_team\_app/}\allowbreak\texttt{prompts}, que actúan como base de conocimiento para la IA durante la generación de código:
 \begin{itemize}
-    \item \textbf{Dominio y Persistencia}: Definición del modelo de datos y base de datos (\texttt{domain.md}, \texttt{bd.md}).
-    \item \textbf{Lógica de Aplicación}: Implementación de \textit{endpoints} y gestión de permisos (\texttt{endpoints.md}, \texttt{permissions.md}).
-    \item \textbf{Seguridad y Auditoría}: Guías para prevenir ataques y realizar auditorías de código (\texttt{attacks.md}, \texttt{audit.md}).
-    \item \textbf{Infraestructura}: Scripts y configuraciones para el entorno de producción (\texttt{deployment.md}).
+    \item \textbf{Dominio y Persistencia}: Modelo de datos y base de datos. \newline Archivos: \texttt{domain.md} y \texttt{bd.md}.
+    \item \textbf{Lógica de Aplicación}: Gestión de \textit{endpoints} y de permisos. \newline Archivos: \texttt{endpoints.md} y \texttt{permissions.md}.
+    \item \textbf{Seguridad y Auditoría}: Guías contra ataques y auditoría de código. \newline Archivos: \texttt{attacks.md} y \texttt{audit.md}.
+    \item \textbf{Infraestructura}: Scripts para el entorno de producción. \newline Archivo: \texttt{deployment.md}.
 \end{itemize}
 
 Esta metodología garantiza que cada componente del sistema no solo sea funcional, sino que sea generado con un contexto profundo sobre las amenazas potenciales identificadas en las fases de diseño.
 
-\section[Arquitectura de Roles (Admin/Cliente)]{Arquitectura de roles (Admin/Cliente)}
-\label{sec:arquitectura_roles}
+Cabe destacar que el diseño y la construcción de los \textit{master prompts} utilizados se fundamentaron de manera explícita en los estándares y marcos normativos de referencia, así como en las herramientas de auditoría y pentesting descritas en el enunciado del proyecto. Específicamente, se incorporaron directrices alineadas con las metodologías de seguridad recomendadas por \textbf{PTES} (Penetration Testing Execution Standard), \textbf{OSSTMM} (Open Source Security Testing Methodology Manual) y la base de conocimiento de tácticas y técnicas de \textbf{MITRE ATT\&CK}. Asimismo, con el fin de prever y mitigar proactivamente la explotación de vulnerabilidades desde la fase de codificación, se modelaron las restricciones de seguridad teniendo en cuenta el alcance y comportamiento de herramientas de análisis y ataque como \textbf{Nmap}, \textbf{Wireshark}, \textbf{Burp Suite}, \textbf{Metasploit}, \textbf{SQLMap}, \textbf{Hydra}, \textbf{Chntpw} y \textbf{Lazesoft}. De este modo, el flujo agéntico recibió instrucciones contextualizadas para estructurar mecanismos defensivos capaces de resistir el uso de este arsenal tanto en vectores de ataque lógicos como físicos.
 
 \section[Auditoría de Código (QA)]{Auditoría de Código (QA) y medidas Secure by Design implementadas}
 \label{sec:auditoria_codigo}
 
-\section[Mitigación de Alucinaciones de la IA]{Identificación y mitigación de alucinaciones inseguras introducidas por la IA}
-\label{sec:mitigacion_alucinaciones}
+Con el fin de asegurar que el código generado no solo cumpliera con los requisitos funcionales básicos sino que además respetara los principios de desarrollo seguro (\textit{Secure by Design}), se llevó a cabo un riguroso y sistemático proceso iterativo de revisión y auditoría de código:
+
+\begin{enumerate}
+    \item \textbf{Auditoría enfocada en seguridad}: Una vez generada la estructura inicial de la aplicación, se utilizaron los mismos \textit{master prompts} en sesiones de chat especializadas para analizar exhaustivamente el código resultante. En esta fase, se instruyó a la IA para que pusiera el foco crítico de manera exclusiva en los principios de ciberseguridad (tales como la defensa en profundidad, el principio de menor privilegio, la validación estricta de entradas y la codificación de salidas) y en la funcionalidad lógica esperada de la app.
+    
+    \item \textbf{Búsqueda activa de vulnerabilidades}: Durante este proceso de revisión, se buscó activamente identificar debilidades lógicas, posibles inyecciones (SQLi), vulnerabilidades de control de acceso (como IDOR o fallos en RBAC), fallos de validación o alucinaciones inseguras del modelo.
+    
+    \item \textbf{Refinamiento y regeneración}: Cada debilidad detectada sirvió de retroalimentación para refinar los prompts originales. Con estas directrices mejoradas, se volvió a generar el componente afectado.
+    
+    \item \textbf{Ciclos de mejora (bucle iterativo)}: Este bucle de prueba, detección de fallos, optimización de prompts y regeneración de código se repitió un par de veces consecutivas. Esta aproximación iterativa permitió pulir fallas sutiles y asegurar la máxima robustez del activo final frente a posibles ataques.
+\end{enumerate}
+
+Como resultado de este proceso, se implementaron medidas defensivas clave que mitigan los riesgos más comunes en aplicaciones web, garantizando que el diseño de seguridad esté integrado de raíz en el propio código fuente de la aplicación.

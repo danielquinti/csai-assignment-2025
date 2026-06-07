@@ -162,7 +162,7 @@
 \fancyhead[R]{{\small\nouppercase{\textsl{\rightmark}}}}
 \fancyfoot{}
 \fancyfoot[C,CO]{\thepage}
-\setlength{\headheight}{14pt}
+\setlength{\headheight}{15pt}
 
 \fancypagestyle{sobrante}{\fancyfoot[CE,CO]{\color{red} \hrulefill PÁXINA EXTRA \hrulefill \thepage{} \hrulefill PÁXINA EXTRA \hrulefill}}
 
@@ -209,14 +209,13 @@
 
 \lstset{
   basicstyle=\ttfamily\footnotesize, % estilo da fonte para entornos de código
-  breakatwhitespace=true,            % pártense as liñas só polos espazos en branco
+  breakatwhitespace=false,           % pártense as liñas en calquera carácter se é necesario
   breaklines=true,                   % pártense as liñas automaticamente
   captionpos=b,                      % a lenda vai debaixo
   commentstyle=\color{udcgray},      % os comentarios van en gris
   frame=single,	                     % o código leva un cadro arredor
   keepspaces=true,                   % respéctanse os espazos no código LaTeX
   keywordstyle=\color{ficblue},      % as palabras chave da linguaxe van en azul
-  linewidth=0.95\textwidth,          % anchura do entorno de código
   numbers=left,                      % numéranse as liñas á esquerda
   numbersep=5pt,                     % separación da numeración das liñas
   numberstyle=\tiny\color{udcgray},  % estilo da numeración
@@ -227,7 +226,8 @@
   stepnumber=1,                      % a numeración de liñas vai de dúas en dúas
   stringstyle=\color{udcpink},       % as cadeas de texto literais aparecen en rosado
   tabsize=2,	                     % os tabuladores equivalen a dous espazos
-  xleftmargin=0.05\textwidth         % identación extra desde a marxe esquerda
+  xleftmargin=10pt,                  % indentación desde a marxe esquerda
+  xrightmargin=10pt                  % indentación desde a marxe dereita
 }
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
