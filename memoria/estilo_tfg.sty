@@ -97,9 +97,21 @@
     \def\nomemencion{\mbox{}}
     \def\carimbo{\vspace*{125pt}\mbox{}}
   }{
-    \def\nometitulacion{GRAO EN INTELIXENCIA ARTIFICIAL}
-    \def\nomemencion{\mbox{}}
-    \def\carimbo{\vspace*{125pt}\mbox{}}
+    \ifthenelse{\equal{\titulacion}{gia}}{
+      \def\nometitulacion{GRAO EN INTELIXENCIA ARTIFICIAL}
+      \def\nomemencion{\mbox{}}
+      \def\carimbo{\vspace*{125pt}\mbox{}}
+    }{
+      \ifthenelse{\equal{\titulacion}{muii}}{
+        \def\nometitulacion{MÁSTER UNIVERSITARIO EN INGENIERÍA INFORMÁTICA}
+        \def\nomemencion{\mbox{}}
+        \def\carimbo{\vspace*{125pt}\mbox{}}
+      }{
+        \def\nometitulacion{MÁSTER UNIVERSITARIO EN INGENIERÍA INFORMÁTICA}
+        \def\nomemencion{\mbox{}}
+        \def\carimbo{\vspace*{125pt}\mbox{}}
+      }
+    }
   }
 }
 
@@ -201,7 +213,7 @@
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 \DTMsavenow{lastcompilationdate}
-\def\datasimple{\begin{galician}\DTMmonthname{\DTMfetchmonth{lastcompilationdate}} de \DTMfetchyear{lastcompilationdate}\end{galician}}
+\def\datasimple{junio de 2026}
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % opcións listings                     %

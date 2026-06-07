@@ -1,11 +1,59 @@
-\chapter[Evaluación Final y SLA]{Evaluación Final y Acuerdos de Nivel de Servicio (SLA)}
+\chapter[Conclusiones]{Conclusiones}
 \label{chap:evaluacion_final_sla}
-
-\section[Registro de Incidentes e Impacto]{Registro de incidentes e impacto operativo}
-\label{sec:registro_incidentes}
-
-\section[Balance de Créditos de Negocio]{Balance de créditos de negocio según la matriz de penalizaciones y bonificaciones}
-\label{sec:balance_creditos}
 
 \section[Registro de RFIs o Consultorías]{Registro de ``Requests for Information'' (RFI) o consultorías técnicas solicitadas}
 \label{sec:registro_rfi}
+Durante el transcurso de las actividades de auditoría y respuesta, se gestionó la comunicación formal entre los equipos ofensivo (\textit{Red Team}) y defensivo (\textit{Blue Team}) mediante el procedimiento establecido de solicitudes de información o RFIs (\textit{Requests for Information}). Los documentos originales en formato PDF correspondientes a estas solicitudes y respuestas se encuentran archivados en el repositorio del proyecto (véase el \ref{chap:anexo_rfi}). A continuación se detallan las solicitudes tramitadas de manera oficial:
+
+\begin{description}
+    \item[\textbf{RFI 01 --- Equipo Ofensivo (\textit{Red Team})}] \hfill
+    \begin{itemize}
+        \item \textbf{Motivo}: Durante el análisis activo de vulnerabilidades, se detectó que la máquina virtual objetivo se apagaba inesperadamente de forma periódica tras pocos minutos de actividad, dificultando el mantenimiento de sesiones continuas de análisis y auditoría.
+        \item \textbf{Resolución y Estado}: \textit{Inconclusa}. El equipo técnico responsable del entorno no contaba con el margen de tiempo necesario para diagnosticar o estabilizar el comportamiento del hipervisor.
+    \end{itemize}
+    
+    \item[\textbf{RFI 02 --- Equipo Defensor (\textit{Blue Team})}] \hfill
+    \begin{itemize}
+        \item \textbf{Motivo}: En la fase forense post-incidente, al intentar acceder localmente al sistema comprometido para la recolección de telemetría y artefactos, se constató que las credenciales de administración por defecto habían sido modificadas durante la intrusión.
+        \item \textbf{Resolución y Estado}: \textit{Exitosa}. El equipo ofensivo facilitó oportunamente las nuevas credenciales de acceso a través del canal oficial, posibilitando las labores forenses.
+    \end{itemize}
+\end{description}
+
+\subsection*{Adherencia y Cumplimiento de las Reglas de Compromiso (RoE)}
+Durante la fase de penetración ofensiva (\textit{pentesting}), se registró un incidente de comunicación extraoficial iniciado por el equipo atacante (\textit{Red Team}). La contraparte contactó de forma directa a miembros del equipo defensor a través de canales no oficiales para consultar información técnica acerca de un presunto binario malicioso en ejecución en el entorno proporcionado. 
+
+En estricto cumplimiento de las Reglas de Compromiso (\textit{Rules of Engagement} --- RoE) acordadas para el ejercicio y con el objetivo de preservar la transparencia e imparcialidad de la auditoría, se denegó cualquier intercambio de información por vías informales. Asimismo, se instó al equipo atacante a formalizar su consulta mediante el procedimiento regulado de RFI. De esta forma, se garantizó la trazabilidad de las interacciones y el rigor metodológico establecido para el escenario de simulación.
+
+
+\section[Lecciones Aprendidas]{Lecciones aprendidas}
+\label{sec:lecciones_aprendidas}
+
+\subsection*{Selección del Stack Tecnológico frente a Restricciones de Infraestructura}
+En la planificación de proyectos tecnológicos, ante la ausencia de una especificación restrictiva del stack de desarrollo, debe prevalecer la facilidad de despliegue sobre el entorno de producción real por encima de la familiaridad subjetiva con herramientas particulares. Favorecer tecnologías aparentemente más sencillas en su fase de desarrollo local (como el uso de Python) puede resultar contraproducente si introduce incompatibilidades críticas con el sistema operativo de destino. En entornos Windows Server, el ecosistema nativo e intuitivo está constituido por la pila ASP.NET Core y el servidor IIS (\textit{Internet Information Services}). Aunque Python presente una menor curva de aprendizaje inicial, su integración en Windows resulta menos eficiente e introduce complejidades operativas en la administración del servicio y la gestión de permisos del pool de aplicaciones, lo que valida a .NET e IIS como la elección arquitectónica óptima para esta infraestructura.
+
+\subsection*{Equilibrio Operativo: Robustez del Bastionado frente a Mantenimiento Defensivo}
+Las políticas de bastionado (\textit{hardening}) aplicadas sobre un activo digital deben diseñarse de forma que no inhabiliten el mantenimiento y la auditoría posterior al despliegue. En el escenario práctico de este proyecto, la desactivación rigurosa de canales comunes de administración remota (tales como el servicio SSH) cumplió eficazmente la función de mitigar la superficie de exposición del sistema frente a ataques laterales del equipo ofensivo (\textit{Red Team}). No obstante, esta contención perimetral estricta requirió un esfuerzo de reversión y reconfiguración técnica adicional para habilitar la ejecución de flujos agénticos automatizados y herramientas forenses de recolección remota de evidencias tras confirmarse la intrusión. La seguridad, por tanto, debe concebirse desde un enfoque holístico que proteja el activo sin entorpecer los procesos legítimos de administración y respuesta a incidentes.
+
+
+\subsection*{Optimización de Directivas mediante el \textit{Harnessing} de Modelos Generativos}
+La construcción de directivas maestras (\textit{master prompts}) para el guiado de modelos de lenguaje (LLM) no debe limitarse a la simple traslación de los requerimientos funcionales o el pliego de la práctica. Dicha simplificación restringe el comportamiento del agente a su conocimiento de entrenamiento básico y lo hace vulnerable a sesgos contextuales. Para maximizar la profundidad técnica y la efectividad de las directivas, se implementó una metodología de investigación previa orientada a identificar amenazas emergentes y patrones avanzados de ciberseguridad. La inyección de este contexto enriquecido de forma estructurada en los prompts maestros representa el concepto de \textit{harnessing} de los LLMs. Esta práctica optimiza de forma sustancial las respuestas de la IA y permite aplicar metodologías de investigación académica rigurosa a los ciclos de vida de desarrollo de software asistido por Inteligencia Artificial.
+
+\section[Uso de LLM en la Práctica]{Uso de LLM en la práctica}
+\label{sec:uso_llm_practica}
+
+El desarrollo, bastionado, evaluación ofensiva y análisis forense del activo digital implementados en esta práctica estuvieron guiados por el uso sistemático de herramientas agénticas basadas en modelos de lenguaje de gran escala (LLM). A lo largo de las distintas fases del ciclo de vida del proyecto, la metodología de interacción y la arquitectura de los prompts evolucionaron significativamente para adaptarse a los requisitos de autonomía y especialización de cada etapa.
+
+\subsection*{Fase de Construcción del Activo: GitHub Copilot en VSCode}
+Durante la fase inicial de diseño y construcción del software (Web CRUD), las sesiones agénticas se ejecutaron en el entorno de desarrollo \textit{Visual Studio Code} (VSCode) empleando \textit{GitHub Copilot}. En esta etapa, la arquitectura de las instrucciones se estructuró de manera híbrida. Por un lado, se definió un prompt maestro que actuaba como núcleo directivo general del agente de codificación. Por otro lado, esta directiva maestra se complementó con ficheros de dominio independientes que contenían conocimiento específico sobre la persistencia, la lógica de negocio, las APIs expuestas y las restricciones de seguridad (véanse los enlaces a estos componentes en el \ref{chap:anexo_prompt}). Esta fragmentación del conocimiento de dominio permitió mantener los contextos de los prompts contenidos y específicos, facilitando la generación limpia y modular de las clases y controladores de la aplicación ASP.NET Core.
+
+\subsection*{Fases Posteriores a la Construcción: Workflows y Rules en Antigravity IDE}
+Una vez consolidado el código fuente base de la aplicación, las fases subsiguientes (despliegue en IIS, bastionado perimetral, pentesting ofensivo y análisis forense post-incidente) exigieron un nivel superior de control contextual y reproducibilidad operativa. Para ello, se migró el entorno de trabajo a sesiones agénticas especializadas dentro de \textit{Antigravity IDE}.
+
+En este nuevo ecosistema, la estructura de prompts evolucionó hacia un modelo gobernado de forma estricta mediante reglas de comportamiento (\textit{rules}) y flujos guiados (\textit{workflows}). Los ficheros de reglas definieron el rol forense u ofensivo del agente en cada fase y sus correspondientes restricciones de seguridad y exclusión de actividades. En paralelo, los archivos de workflow especificaron de manera secuencial los comandos de auditoría requeridos y el formato de los entregables resultantes en Markdown (cuyos enlaces al repositorio se encuentran documentados en el \ref{chap:anexo_prompt}). Esta evolución de prompts modulares de construcción hacia directivas dinámicas de flujo en \textit{Antigravity IDE} posibilitó que las acciones del analista agéntico se ajustaran a estándares forenses estrictos (como RFC 3227 e ISO/IEC 27037) de forma autónoma.
+
+\subsection*{Refinamiento Editorial y Ajuste de Tono mediante Borradores de los Autores}
+Las conclusiones, el análisis de impacto operativo y las lecciones aprendidas recopiladas en este informe final se originaron a partir de borradores manuscritos preliminares de los autores. Estos escritos técnicos iniciales estructuraron las ideas esenciales, observaciones de la telemetría e incidentes reales. A continuación, el modelo generativo de IA procesó dichos borradores en bruto para refinar el estilo, estructurar formalmente el discurso y unificar el tono con los requisitos estándar de un entregable académico de ciberseguridad, asegurando en todo momento la autoría humana del análisis de seguridad.
+
+
+
+

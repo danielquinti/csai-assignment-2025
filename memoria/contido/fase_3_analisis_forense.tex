@@ -118,6 +118,8 @@ La recolección de evidencia se ejecutó respetando estrictamente el orden de vo
 5 & Artefactos de persistencia & Servicios, cuentas locales, tareas programadas, registro \\ \hline
 6 & Archivos en disco & Binarios, scripts, logs de IIS, configuraciones \\ \hline
 \end{tabular}
+\caption{Metodología de recolección de evidencia y orden de volatilidad (RFC 3227).}
+\label{tab:recoleccion_evidencia}
 \end{table}
 
 Todos los comandos ejecutados fueron de \textbf{solo lectura} (ISO/IEC 27037), y cada artefacto fue documentado con hash SHA-256, ruta y marcas de tiempo para preservar la \textbf{cadena de custodia}.
@@ -140,6 +142,8 @@ Cuenta \texttt{Administrador} (honeytoken) & Cuenta señuelo sin privilegios, cr
 Configuración de Sysmon \texttt{WinNetSvc}\allowbreak\texttt{.xml} & Reglas de detección defensivas \\ \hline
 Toda la actividad a partir del 7 de abril & Fase de recuperación del Blue Team \\ \hline
 \end{tabular}
+\caption{Exclusiones de actividad legítima ejecutada por el Blue Team.}
+\label{tab:exclusiones_blue_team}
 \end{table}
 
 \section[Reconstrucción de la Kill Chain]{Reconstrucción de la ``Kill Chain''}
