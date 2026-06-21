@@ -1,17 +1,18 @@
-# Informe Exhaustivo: Inyección y Modificación de Memoria RAM en la VM Objetivo (CSAI)
+# Inyección de RAM
 
 **Fecha de compilación:** 2026-06-07  
 **Objetivo:** Máquina del Blue Team — Windows Server 2025 (VM VirtualBox `CSAI`)  
 **Operador:** Red Team (ejercicio autorizado CSAI 2025)  
 **Condición de victoria global:** Exfiltrar la Base de Datos y obtener shell como `NT AUTHORITY\SYSTEM`  
-**Alcance de este documento:** Fase ofensiva de **escritura e inyección en RAM** (no lectura forense ni extracción BitLocker, aunque se referencian los prerrequisitos).
+**Alcance:** Fase ofensiva de **escritura e inyección en RAM** (no lectura forense ni extracción BitLocker, aunque se referencian los prerrequisitos).
+
 
 ---
 
 ## Índice
 
-1. [Resumen ejecutivo](#1-resumen-ejecutivo)
-2. [Contexto operativo y pivot estratégico](#2-contexto-operativo-y-pivot-estratégico)
+1. [Resumen ejecutivo y contexto narrativo](#1-resumen-ejecutivo-y-contexto-narrativo)
+2. [Contexto operativo y pivote estratégico](#2-contexto-operativo-y-pivote-estratégico)
 3. [Infraestructura, artefactos y entorno](#3-infraestructura-artefactos-y-entorno)
 4. [Prerrequisito: reconocimiento y localización de objetivos en RAM](#4-prerrequisito-reconocimiento-y-localización-de-objetivos-en-ram)
 5. [Metodología I — Interfaz nativa VirtualBox (`VBoxManage debugvm`)](#5-metodología-i--interfaz-nativa-virtualbox-vboxmanage-debugvm)
@@ -29,7 +30,7 @@
 
 ---
 
-## 1. Resumen ejecutivo
+## 1. Resumen ejecutivo y contexto narrativo
 
 Tras agotar parcialmente la vía de extracción de claves BitLocker (FVEK/VMK) desde volcados RAM estáticos (`memoria.elf`, `.sav`, análisis Volatility3/MemProcFS y scripts de tallado en `intento_romper_bitlocker`), el Red Team pivotó hacia un vector alternativo de **compromiso físico/virtual**:
 
@@ -45,9 +46,23 @@ Tras agotar parcialmente la vía de extracción de claves BitLocker (FVEK/VMK) d
 
 **Hallazgo técnico principal:** VirtualBox 7.2.6 **acepta** comandos GDB sobre el puerto TCP 1234 (ACK de paquetes válidos), pero **rechaza escrituras** (`E81`) en páginas protegidas por la MMU/EPT del guest Windows Server 2025. La API `setregisters MEM:` está **formalmente expuesta pero no implementada** en el backend COM (`0x80004001`).
 
+### 1.1 Relato narrativo del proceso
+
+El objetivo de esta fase era realizar la inyección y modificación de código en la memoria RAM de la máquina virtual (VM) en ejecución.
+
+Inicialmente, se planteó inyectar código en el proceso de inicio de sesión para omitir la autenticación o abrir una consola de comandos (`cmd.exe`). Como prueba de concepto (PoC), se intentó escribir la cadena `HOLA_MUNDO` en la RAM, sustituyendo los caracteres de un mensaje de texto que se mostraba en la pantalla de login.
+
+A lo largo de la investigación, se probaron diversos métodos:
+1. **Depurador de VirtualBox:** Se intentó inyectar el código a través de la interfaz de depuración nativa del hipervisor, pero los comandos de escritura fueron bloqueados.
+2. **Archivos de estado guardado (`.sav`):** Se exploró la modificación directa de los archivos `.sav` generados al pausar la VM, pero la compresión LZF y el cifrado de las estructuras dificultaron el parcheo offline.
+3. **Suspensión de proceso y edición en vivo:** Se suspendió el proceso `VirtualBoxVM.exe` a nivel del sistema operativo anfitrión (host) con el fin de manipular el segmento de RAM asignado. Se utilizaron herramientas como *HxD* y se intentó la ejecución con privilegios de `SYSTEM`. Sin embargo, el hipervisor denegó los permisos de escritura o no persistió los cambios tras reanudar el proceso, posiblemente debido a la necesidad de contar con privilegios de Ring 0 en el host.
+4. **Depuración remota con WinDbg:** Se intentó establecer una sesión de depuración de kernel, lo cual requirió desactivar medidas de seguridad del host (como `hypervisorlaunchtype off`). Aunque se logró interactuar con el depurador, los intentos de escritura provocaron una inestabilidad severa en el hipervisor, resultando en el colapso de la máquina virtual bajo la excepción *Guru Meditation* de VirtualBox.
+
+En conclusión, la inyección directa en RAM no fue exitosa debido a las fuertes restricciones de protección de páginas (EPT/W^X) y la necesidad de eludir protecciones del kernel de Windows Server 2025 y las del propio hipervisor.
+
 ---
 
-## 2. Contexto operativo y pivot estratégico
+## 2. Contexto operativo y pivote estratégico
 
 ### 2.1 Situación previa: lectura RAM / BitLocker
 
@@ -56,7 +71,7 @@ Los directorios analizados para este informe fueron:
 | Ruta | Contenido relevante para inyección |
 |------|-------------------------------------|
 | `RedTeam/` | Informes de intentos (`Intentos/`), scripts (`inyectar.py`), notas (`Inyeccion/inyeccion.md`), volcados `.elf` |
-| `intento_romper_bitlocker/` | Extracción FVEK (lectura); pivot documentado hacia inyección tras fracaso de montaje en Kali |
+| `intento_romper_bitlocker/` | Extracción FVEK (lectura); pivote documentado hacia inyección tras fracaso de montaje en Kali |
 | `RedTeam/ (copia externa)` | Scripts de análisis de volcados (`AnalisisDeVolcados/`); sin scripts de inyección directa |
 
 La fase de **lectura** confirmó presencia de estructuras BitLocker (`FVEp`, `FVE0`, `Cngb`, `TpmP`) pero no produjo una clave montable. Eso empujó la estrategia hacia **modificación activa de RAM** como vector de escalada local dentro del guest.
@@ -552,12 +567,12 @@ También: desmarcar características Windows relacionadas con hypervisor (nota e
 | **Objetivo** | Obtener primitiva de escritura kernel sobre páginas guest |
 | **Resultado** | **FALLO operativo** |
 | **Problema 1** | Imposibilidad práctica de deshabilitar todas las contramedidas sin reinicios múltiples |
-| **Problema 2** | Excepción **"Meditation Guru"** en VirtualBox — colapso del hipervisor al detener en breakpoints kernel |
+| **Problema 2** | Excepción **"Guru Meditation"** en VirtualBox — colapso del hipervisor al detener en breakpoints kernel |
 | **Impacto** | VM inestable; sesión de depuración abortada |
 
-### 9.3 Interpretación "Meditation Guru"
+### 9.3 Interpretación "Guru Meditation"
 
-En logs de VirtualBox, *Meditation Guru* indica fallo interno del **scheduler/código VM** al procesar un evento de depuración inválido o un estado inconsistente CPU↔memoria. No es un mecanismo defensivo del Blue Team, sino una **limitación de robustez** del hipervisor bajo depuración agresiva.
+En logs de VirtualBox, *Guru Meditation* indica fallo interno del **scheduler/código VM** al procesar un evento de depuración inválido o un estado inconsistente CPU↔memoria. No es un mecanismo defensivo del Blue Team, sino una **limitación de robustez** del hipervisor bajo depuración agresiva.
 
 ### 9.4 Conclusión Metodología V
 
@@ -864,7 +879,7 @@ El archivo `recopilacion.md` (Fase 3) afirma que el parcheo GDB tuvo *"éxito co
 | **Causa** | Búsqueda ASCII; posible almacenamiento en superficie composited |
 | **Lección** | Buscar `H\x00O\x00L\x00A\x00...`; considerar volcado dedicado post-input |
 
-### 13.5 Problema: Inestabilidad hipervisor (Meditation Guru)
+### 13.5 Problema: Inestabilidad hipervisor (Guru Meditation)
 
 | Aspecto | Detalle |
 |---------|---------|
@@ -937,7 +952,7 @@ No fue la ausencia de acceso al hipervisor (el Red Team **lo tiene**), sino:
 | 🟡 Media | Diff binario entre dos `.elf` (pre/post input canario) |
 | 🟡 Media | Explorar `VBoxManage debugvm write` / APIs undocumented (si existen en 7.x) |
 | 🟢 Baja | Migrar experimento a hypervisor con mejor soporte debug escribible |
-| 🟢 Baja | Pivot a **Accessibility Features Bypass** offline (documentado en `RED_TEAM_PHASE2_PLAN.md`) |
+| 🟢 Baja | Pivote a **Accessibility Features Bypass** offline (documentado en `RED_TEAM_PHASE2_PLAN.md`) |
 
 ### 15.4 Relación con condición de victoria
 

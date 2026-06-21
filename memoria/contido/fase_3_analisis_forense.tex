@@ -36,13 +36,6 @@ Si la herramienta integrada sigue fallando, se recomienda:
     \item Verificar que el \textit{path} de Python en la configuración del servidor MCP en el Host coincide con \texttt{C:\textbackslash}\allowbreak\texttt{Python312\textbackslash}\allowbreak\texttt{python.exe}.
 \end{itemize}
 
-\textbf{FASE ALTERNATIVA: Túnel Directo por HTTP / SSE}
-
-Para dotar de flexibilidad total al despliegue, se implementó un segundo vector de acceso evadiendo la contención defensiva perimetral:
-\begin{lstlisting}
-New-NetFirewallRule -DisplayName "Backdoor MCP-SSE" -Direction Inbound \
-  -Protocol TCP -LocalPort 8000 -Action Allow
-\end{lstlisting}
 
 \subsection*{Registro Cronológico Exacto de Comandos Ejecutados}
 Para fines de auditoría y replicabilidad, a continuación se listan los comandos exactos disparados desde el host durante la sesión de troubleshooting:

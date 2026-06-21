@@ -1,0 +1,21 @@
+\chapter[Anexo IV: Informes de Análisis de Memoria RAM]{Anexo IV: Informes de Análisis de Memoria RAM (Red Team)}
+\label{chap:anexo_analisis_memoria}
+
+Durante el ejercicio práctico, el equipo ofensivo (\textit{Red Team}) realizó análisis detallados de la memoria RAM de la máquina virtual objetivo para la extracción de material criptográfico de BitLocker y la inyección de código. Dado que ambos vectores de ataque resultaron fallidos y no produjeron un compromiso funcional ni el descifrado del volumen, estos análisis y sus detalles técnicos fueron relegados a este apéndice en lugar de formar parte del cuerpo principal de la memoria. Los informes exhaustivos que detallan cada una de las metodologías empleadas, los scripts de automatización desarrollados, las heurísticas estadísticas aplicadas y los resultados obtenidos se encuentran documentados y disponibles en el repositorio público de GitHub bajo el directorio \texttt{RedTeamBitLocker/}:
+
+
+\begin{itemize}
+    \item \textbf{Informe de Lectura de RAM y Ruptura de BitLocker}: \\
+    Documento que recopila el análisis de volcados físicos de memoria (\texttt{.elf}) y estados guardados (\texttt{.sav}), el perfilado con Volatility 3 y MemProcFS, y la aplicación de algoritmos estadísticos (Entropía Shannon y Chi-cuadrado $\chi^2$) para la búsqueda de claves de cifrado (VMK/FVEK). Incluye la descripción estructurada de los intentos fallidos de extracción de secretos. \\
+    Enlace:
+    \begin{center}
+        \scriptsize\url{https://github.com/danielquinti/csai-assignment-2025/blob/main/RedTeamBitLocker/memory_analysis.md}
+    \end{center}
+    
+    \item \textbf{Informe de Inyección de RAM}: \\
+    Documento que detalla los intentos de escritura directa en caliente en la RAM de la máquina virtual invitada para saltar la autenticación de la pantalla de login. Se describen los métodos mediante GDB RSP, WinDbg kernel y parcheo directo de memoria en el host, junto con el análisis de estabilidad del hipervisor. \\
+    Enlace:
+    \begin{center}
+        \scriptsize\url{https://github.com/danielquinti/csai-assignment-2025/blob/main/RedTeamBitLocker/memory_injection.md}
+    \end{center}
+\end{itemize}

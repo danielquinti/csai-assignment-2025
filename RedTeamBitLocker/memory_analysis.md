@@ -1,4 +1,4 @@
-# Informe Exhaustivo: Lectura y Análisis de Memoria RAM para Ruptura de BitLocker (vTPM)
+# Lectura de RAM y BitLocker
 
 **Fecha de compilación:** 2026-06-07  
 **Objetivo:** Máquina del Blue Team — Windows Server 2025 (VM VirtualBox `CSAI`)  
@@ -10,28 +10,45 @@
 
 ## Índice
 
-1. [Análisis de la configuración de la VM](#1-análisis-de-la-configuración-de-la-vm)
-2. [Justificación del ataque a BitLocker vía RAM](#2-justificación-del-ataque-a-bitlocker-vía-ram)
-3. [Infraestructura de adquisición de memoria](#3-infraestructura-de-adquisición-de-memoria)
-4. [Metodología I — Volatility 3 Framework](#4-metodología-i--volatility-3-framework)
-5. [Metodología II — MemProcFS](#5-metodología-ii--memprocfs)
-6. [Metodología III — Herramientas auxiliares (HxD, strings, aeskeyfind, GDB lectura)](#6-metodología-iii--herramientas-auxiliares-hxd-strings-aeskeyfind-gdb-lectura)
-7. [Metodología IV — WinDbg y lectura kernel (evaluación)](#7-metodología-iv--windbg-y-lectura-kernel-evaluación)
-8. [Metodología V — Pipeline `AnalisisDeVolcados`](#8-metodología-v--pipeline-analisisdevolcados)
-9. [Metodología VI — Extractor híbrido `intento_romper_bitlocker`](#9-metodología-vi--extractor-híbrido-intento_romper_bitlocker)
-10. [Metodología VII — Scripts Python (tallado manual y heurísticas estadísticas)](#10-metodología-vii--scripts-python-tallado-manual-y-heurísticas-estadísticas)
-11. [Intento de montaje en Kali Linux / Windows host](#11-intento-de-montaje-en-kali-linux--windows-host)
-12. [Análisis integrado de resultados](#12-análisis-integrado-de-resultados)
-13. [Problemas encontrados y lecciones aprendidas](#13-problemas-encontrados-y-lecciones-aprendidas)
-14. [Mapeo MITRE ATT&CK](#14-mapeo-mitre-attck)
-15. [Conclusiones y líneas futuras](#15-conclusiones-y-líneas-futuras)
-16. [Anexos](#16-anexos)
+1. [Resumen narrativo y contexto](#1-resumen-narrativo-y-contexto)
+2. [Análisis de la configuración de la VM](#2-análisis-de-la-configuración-de-la-vm)
+3. [Justificación del ataque a BitLocker vía RAM](#3-justificación-del-ataque-a-bitlocker-vía-ram)
+4. [Infraestructura de adquisición de memoria](#4-infraestructura-de-adquisición-de-memoria)
+5. [Metodología I — Volatility 3 Framework](#5-metodología-i--volatility-3-framework)
+6. [Metodología II — MemProcFS](#6-metodología-ii--memprocfs)
+7. [Metodología III — Herramientas auxiliares (HxD, strings, aeskeyfind, GDB lectura)](#7-metodología-iii--herramientas-auxiliares-hxd-strings-aeskeyfind-gdb-lectura)
+8. [Metodología IV — WinDbg y lectura kernel (evaluación)](#8-metodología-iv--windbg-y-lectura-kernel-evaluación)
+9. [Metodología V — Pipeline `AnalisisDeVolcados`](#9-metodología-v--pipeline-analisisdevolcados)
+10. [Metodología VI — Extractor híbrido `intento_romper_bitlocker`](#10-metodología-vi--extractor-híbrido-intento_romper_bitlocker)
+11. [Metodología VII — Scripts Python (tallado manual y heurísticas estadísticas)](#11-metodología-vii--scripts-python-tallado-manual-y-heurísticas-estadísticas)
+12. [Intento de montaje en Kali Linux / Windows host](#12-intento-de-montaje-en-kali-linux--windows-host)
+13. [Análisis integrado de resultados](#13-análisis-integrado-de-resultados)
+14. [Problemas encontrados y lecciones aprendidas](#14-problemas-encontrados-y-lecciones-aprendidas)
+15. [Mapeo MITRE ATT&CK](#15-mapeo-mitre-attck)
+16. [Conclusiones y líneas futuras](#16-conclusiones-y-líneas-futuras)
+17. [Anexos](#17-anexos)
+    - [Anexo E — Intentos fallidos de extracción de secretos de RAM](#anexo-e--intentos-fallidos-de-extracción-de-secretos-de-ram)
 
 ---
 
-# 1. Análisis de la configuración de la VM
+## 1. Resumen narrativo y contexto
 
-## 1.1 Artefactos de orquestación analizados
+El objetivo principal de esta fase fue analizar los volcados de memoria RAM de la máquina virtual con el propósito de extraer la clave de cifrado de volumen (FVEK) o la clave maestra (VMK) y desbloquear el volumen cifrado con BitLocker (vTPM habilitado).
+
+El flujo de trabajo se desarrolló bajo los siguientes enfoques:
+1. **Análisis de configuración (`.vbox`):** Se analizó la configuración de la VM para detectar debilidades en el esquema de seguridad (por ejemplo, la ausencia de un PIN de BitLocker).
+2. **Herramientas de análisis forense:** Se intentó utilizar *Volatility 3* para extraer la clave de forma automatizada y montar el disco. No obstante, la falta de perfiles específicos de símbolos para esta versión reciente de Windows Server 2025 limitó la efectividad de los plugins automatizados.
+3. **Búsqueda manual y heurística:**
+   - Se recurrió al editor hexadecimal *HxD* y a scripts personalizados en Python para inspeccionar los volcados de memoria (`.elf`).
+   - Se localizaron marcadores estructurales del pool de memoria de BitLocker (como la firma `FVEK`). Sin embargo, las claves no se encontraban en texto plano continuo inmediato debido al almacenamiento estructurado del driver `fvevol.sys`.
+   - Se implementaron scripts para extraer ventanas de bytes posteriores a los marcadores y filtrar candidatos mediante heurísticas estadísticas basadas en entropía de información (Shannon) y análisis de chi-cuadrado ($\chi^2$) para medir la aleatoriedad.
+   - Para reducir la gran cantidad de falsos positivos y acotar el espacio de búsqueda, se aplicó una técnica de intersección de volcados múltiples (doble y triple volcado), quedándose únicamente con los patrones de bytes presentes de forma de persistencia en todos ellos.
+
+A pesar de reducir los candidatos a un conjunto manejable, los intentos de descifrado offline y de montaje de la partición en Kali Linux (utilizando herramientas como `dislocker` y `bdemount`) no resultaron en un montaje exitoso.
+
+## 2. Análisis de la configuración de la VM
+
+### 2.1 Artefactos de orquestación analizados
 
 | Artefacto | Ubicación típica | Rol en el ataque |
 |-----------|------------------|------------------|
@@ -45,7 +62,7 @@
 **Nombre VM:** `CSAI`  
 **SO declarado:** `Windows2022_64` (Windows Server 2025, build 26100)
 
-## 1.2 Parámetros hardware relevantes (`.vbox`)
+### 2.2 Parámetros hardware relevantes (`.vbox`)
 
 | Parámetro | Valor | Implicación forense |
 |-----------|-------|---------------------|
@@ -58,7 +75,7 @@
 | `NX` | Deshabilitado (notas operativas) | DEP debilitado; simplifica post-explotación (no extracción directa) |
 | CPUs | 3 (`KeNumberProcessors=3`) | `dumpvmcore` congela 3 vCPUs atómicamente |
 
-## 1.3 Análisis del `.nvram` (vTPM)
+### 2.3 Análisis del `.nvram` (vTPM)
 
 **Hallazgo documentado (`intento_romper_bitlocker.md`):**
 
@@ -72,7 +89,7 @@ Header inicial: TpmEmuTpms/permall
 - El estado del vTPM almacena mediciones PCR y secretos sellados usados por BitLocker en arranque.
 - Complemento al volcado RAM: el `.nvram` es candidato para extracción VMK offline (vector paralelo, no completado).
 
-## 1.4 Servicios defensivos observados en RAM
+### 2.4 Servicios defensivos observados en RAM
 
 Desde MemProcFS / análisis de procesos:
 
@@ -85,9 +102,9 @@ Desde MemProcFS / análisis de procesos:
 
 ---
 
-# 2. Justificación del ataque a BitLocker vía RAM
+## 3. Justificación del ataque a BitLocker vía RAM
 
-## 2.1 Cadena criptográfica BitLocker (modelo operativo)
+### 3.1 Cadena criptográfica BitLocker (modelo operativo)
 
 ```mermaid
 flowchart LR
@@ -99,7 +116,7 @@ flowchart LR
     F --> G[Pantalla Login — claves AÚN en RAM]
 ```
 
-## 2.2 Por qué la pantalla de login es el «sweet spot»
+### 3.2 Por qué la pantalla de login es el «sweet spot»
 
 Documentado en `intento2LecturaRam.md`:
 
@@ -111,7 +128,7 @@ Documentado en `intento2LecturaRam.md`:
 
 **Consecuencia:** En pantalla de login el disco sigue cifrado en reposo, pero el SO mantiene material criptográfico en RAM para operar el volumen montado.
 
-## 2.3 Objetivos criptográficos buscados en RAM
+### 3.3 Objetivos criptográficos buscados en RAM
 
 | Material | Tamaño típico | Uso |
 |----------|---------------|-----|
@@ -121,7 +138,7 @@ Documentado en `intento2LecturaRam.md`:
 | **AES Key Schedule** | 176 B (AES-128) / 240 B (AES-256) | Expansión de clave detectable por `aeskeyfind` |
 | **Tags pool** | Variable | `FVEp`, `FVE0`, `Cngb`, `TpmP` — marcadores estructurales |
 
-## 2.4 Hipótesis de trabajo (todos los informes agente)
+### 3.4 Hipótesis de trabajo (todos los informes agente)
 
 > Si se obtiene un volcado suficientemente completo con BitLocker ya desbloqueado, es posible recuperar VMK/FVEK y montar el `.vdi` offline en Kali con `dislocker` / `bdemount`.
 
@@ -129,9 +146,9 @@ Documentado en `intento2LecturaRam.md`:
 
 ---
 
-# 3. Infraestructura de adquisición de memoria
+## 4. Infraestructura de adquisición de memoria
 
-## 3.1 Fuentes de memoria evaluadas
+### 4.1 Fuentes de memoria evaluadas
 
 | Fuente | Formato | Evaluación | Documento |
 |--------|---------|------------|-----------|
@@ -140,7 +157,7 @@ Documentado en `intento2LecturaRam.md`:
 | **Save State** | `*.sav` ~500 MB | Valiosa (TPM+RAM) pero LZF comprimido | Intento 5 §2.1 |
 | GDB lectura live | TCP 1234 | Degradada — timeouts/SIGTRAP | `intento1LecturaRam.md` |
 
-## 3.2 Volcado principal: `debugvm dumpvmcore` → `.elf`
+### 4.2 Volcado principal: `debugvm dumpvmcore` → `.elf`
 
 **Comandos utilizados:**
 
@@ -179,7 +196,7 @@ Add-MpPreference -ExclusionProcess "VBoxManage.exe"
 + RAW PHYSICAL MEMORY (~4 GB)
 ```
 
-## 3.3 Save State (`.sav`)
+### 4.3 Save State (`.sav`)
 
 **Obtención:**
 
@@ -197,7 +214,7 @@ VirtualBox → Close → Save Machine State
 - Búsquedas `strings`/`grep` de tags `FVE*`, `HOLAHOLAHOLA` → **cero coincidencias** en texto plano.
 - Referencias sí encontradas indirectamente tras descompresión implícita al restaurar (cadenas `FveOpenVolumeW`, `FveTpmLib`).
 
-## 3.4 Validación del volcado `.elf`
+### 4.4 Validación del volcado `.elf`
 
 **Plugin:** `windows.info` (Volatility 3.2.28.1)
 
@@ -217,13 +234,13 @@ VirtualBox → Close → Save Machine State
 
 ---
 
-# 4. Metodología I — Volatility 3 Framework
+## 5. Metodología I — Volatility 3 Framework
 
 **Ubicación toolchain:** `RedTeam/ForensicToolbox/volatility3/`  
 **Versión:** 2.28.1  
-**Salidas consolidadas:** `RedTeam/ScaningCSAIelf/`
+**Salidas consolidadas:** `RedTeam/ScanningCSAIelf/`
 
-## 4.1 INTENTO V-1 — Perfilado básico (`windows.info`)
+### 5.1 INTENTO V-1 — Perfilado básico (`windows.info`)
 
 | Campo | Detalle |
 |-------|---------|
@@ -232,7 +249,7 @@ VirtualBox → Close → Save Machine State
 | **Resultado** | **ÉXITO** — PDB `ntkrnlmp.pdb` descargado automáticamente |
 | **Fuente** | `intento2LecturaRam.md` Intento #1 |
 
-## 4.2 INTENTO V-2 — Plugin nativo `windows.bitlocker`
+### 5.2 INTENTO V-2 — Plugin nativo `windows.bitlocker`
 
 | Campo | Detalle |
 |-------|---------|
@@ -242,7 +259,7 @@ VirtualBox → Close → Save Machine State
 | **Error** | `invalid choice 'windows.bitlocker'` |
 | **Causa** | Plugin **no integrado** en build local Vol3; era exclusivo Vol2 (elceef) |
 
-## 4.3 INTENTO V-3 — Plugin comunitario Alexandre-D'Hondt
+### 5.3 INTENTO V-3 — Plugin comunitario Alexandre-D'Hondt
 
 | Campo | Detalle |
 |-------|---------|
@@ -250,7 +267,7 @@ VirtualBox → Close → Save Machine State
 | **Resultado** | **FALLO** — HTTP 404 |
 | **Causa** | Repositorio reestructurado; URL obsoleta |
 
-## 4.4 INTENTO V-4 — Búsqueda lineal `strings` + `grep`
+### 5.4 INTENTO V-4 — Búsqueda lineal `strings` + `grep`
 
 | Campo | Detalle |
 |-------|---------|
@@ -259,7 +276,7 @@ VirtualBox → Close → Save Machine State
 | **Resultado** | **PARCIALMENTE ÚTIL** — confirma actividad `fvevol.sys`, no extrae clave binaria |
 | **Limitación** | FVEK almacenada como bytes no imprimibles |
 
-## 4.5 INTENTO V-5 — `aeskeyfind`
+### 5.5 INTENTO V-5 — `aeskeyfind`
 
 | Campo | Detalle |
 |-------|---------|
@@ -270,7 +287,7 @@ VirtualBox → Close → Save Machine State
 | **Resultado documentado en Intento5** | **No candidatos válidos confirmados** para montaje |
 | **Matiz** | Discrepancia entre informes: herramienta produjo listado pero validación FVEK falló |
 
-## 4.6 INTENTO V-6 — `windows.modules`
+### 5.6 INTENTO V-6 — `windows.modules`
 
 | Campo | Detalle |
 |-------|---------|
@@ -279,7 +296,7 @@ VirtualBox → Close → Save Machine State
 | **Resultado** | **ÉXITO** — lista `PsLoadedModuleList` build 26100 |
 | **Utilidad** | Acotar búsqueda manual posterior |
 
-## 4.7 INTENTO V-7 — `windows.bigpools.BigPools`
+### 5.7 INTENTO V-7 — `windows.bigpools.BigPools`
 
 | Campo | Detalle |
 |-------|---------|
@@ -311,7 +328,7 @@ VirtualBox → Close → Save Machine State
 | **TpmP** | Pool TPM — candidato **VMK** |
 | **Cngb** | CNG buffer — candidato **FVEK** en Windows modernos |
 
-## 4.8 INTENTO V-8 — `windows.memmap` + volcado PID 4
+### 5.8 INTENTO V-8 — `windows.memmap` + volcado PID 4
 
 | Campo | Detalle |
 |-------|---------|
@@ -320,7 +337,7 @@ VirtualBox → Close → Save Machine State
 | **Resultado parcial** | `pid.4.dmp` generado (~**1.64 GB**) |
 | **Problema** | **Missing memmap page** en VAs críticas (Cngb, FVEx, dFVE, varios FVEp) |
 
-## 4.9 INTENTO V-9 — Plugins adicionales ejecutados
+### 5.9 INTENTO V-9 — Plugins adicionales ejecutados
 
 | Plugin | Salida | Hallazgo |
 |--------|--------|----------|
@@ -331,7 +348,7 @@ VirtualBox → Close → Save Machine State
 | `windows.dumpfiles` (lsass) | `windows.dumpfiles_lsass.txt` | Artefactos LSASS |
 | Plugin bitlocker tmp | `860.fve.txt`, `860.aes.txt` | Referencias FVEAPI, strings FVE0 |
 
-## 4.10 INTENTO V-10 — `layerwriter` (reconstrucción capa completa)
+### 5.10 INTENTO V-10 — `layerwriter` (reconstrucción capa completa)
 
 | Campo | Detalle |
 |-------|---------|
@@ -340,13 +357,13 @@ VirtualBox → Close → Save Machine State
 | **Artefacto parcial** | `layerdump/tmp_vd02v2oo.vol3` (muy grande) |
 | **Consecuencia** | VAs Cngb/FVE no reconstruidas |
 
-## 4.11 Plugins community3 / bitlocker local
+### 5.11 Plugins community3 / bitlocker local
 
 Directorio `RedTeam/tmp_plugins/community3/` — repositorio clonado para plugins Vol3 adicionales (Hyper-V, Docker, Yara, etc.). **Sin plugin BitLocker funcional** integrado para WS2025.
 
 Script local `tmp_plugins/bitlocker/bitlocker.py` — intento port; no produjo extracción validada.
 
-## 4.12 Tabla resumen Volatility 3
+### 5.12 Tabla resumen Volatility 3
 
 | ID | Plugin/Acción | Resultado | Bloqueo |
 |----|---------------|-----------|---------|
@@ -363,19 +380,19 @@ Script local `tmp_plugins/bitlocker/bitlocker.py` — intento port; no produjo e
 
 ---
 
-# 5. Metodología II — MemProcFS
+## 6. Metodología II — MemProcFS
 
-**Documentos:** `Intentos/intento4LecutraRam.md`, `Analisis_MemProcFS_elf/`  
+**Documentos:** `Intentos/intento4LecturaRam.md`, `Analisis_MemProcFS_elf/`  
 **Motivación:** Volatility3 insuficiente para WS2025 + BitLocker moderno.
 
-## 5.1 Problemas instalación Kali (descartados)
+### 6.1 Problemas instalación Kali (descartados)
 
 | Error | Causa | Decisión |
 |-------|-------|----------|
 | `CMakeLists.txt not found` | Makefile build | — |
 | `fuse.h not found` | Falta libfuse-dev | **Pivot a Windows** |
 
-## 5.2 Montaje exitoso en Windows (Dokany)
+### 6.2 Montaje exitoso en Windows (Dokany)
 
 ```powershell
 MemProcFS.exe -f CSAI.elf -mount M:
@@ -388,7 +405,7 @@ Initialized 64-bit Windows 10.0.26100
 M:\
 ```
 
-## 5.3 Estructura filesystem virtual M:
+### 6.3 Estructura filesystem virtual M:
 
 ```text
 M:\
@@ -404,7 +421,7 @@ M:\
 └── py/regsecrets/   (plugin secretos — explorado)
 ```
 
-## 5.4 Análisis BitLocker vía MemProcFS
+### 6.4 Análisis BitLocker vía MemProcFS
 
 **Servicios confirmados en registro:**
 
@@ -423,7 +440,7 @@ BDESVC, fvevol, CryptSvc, EFS, FileCrypt
 
 **Resultado clave:** Registro accesible; **VMK/FVEK no en HKLM** (esperado — claves en RAM/pools, no registry).
 
-## 5.5 Valor forense MemProcFS
+### 6.5 Valor forense MemProcFS
 
 | Logró | No logró |
 |-------|----------|
@@ -432,7 +449,7 @@ BDESVC, fvevol, CryptSvc, EFS, FileCrypt
 | memory.pmem para tallado | Sustituir Missing pages Vol3 |
 | Enumeración 85+ procesos | Montaje Kali directo |
 
-## 5.6 Scripts shell PowerShell en `Analisis_MemProcFS_elf/`
+### 6.6 Scripts shell PowerShell en `Analisis_MemProcFS_elf/`
 
 | Script | Función |
 |--------|---------|
@@ -445,9 +462,9 @@ Informe agente: `INFORME_FINAL_BITLOCKER_EXTRACTION.md` — confirma candidatos 
 
 ---
 
-# 6. Metodología III — Herramientas auxiliares (HxD, strings, aeskeyfind, GDB lectura)
+## 7. Metodología III — Herramientas auxiliares (HxD, strings, aeskeyfind, GDB lectura)
 
-## 6.1 HxD — Análisis visual previo a Python
+### 7.1 HxD — Análisis visual previo a Python
 
 **Usos documentados:**
 
@@ -461,7 +478,7 @@ Informe agente: `INFORME_FINAL_BITLOCKER_EXTRACTION.md` — confirma candidatos 
 
 **Limitación:** Impracticable sobre ~4 GB repetidamente; migración obligatoria a scripts.
 
-## 6.2 INTENTO L.1–L.5 — Lectura vía GDB Stub (`intento1LecturaRam.md`)
+### 7.2 INTENTO L.1–L.5 — Lectura vía GDB Stub (`intento1LecturaRam.md`)
 
 Aunque orientados también a inyección, documentan **lectura** de RAM live:
 
@@ -473,7 +490,7 @@ Aunque orientados también a inyección, documentan **lectura** de RAM live:
 | L.4 | Handshake PS `$?#3f` | ⚠️ Respuesta `$` parcial |
 | L.5 | Lectura `m7b9af5c,14#00` | ❌ SIGTRAP T05 — kernel protegido |
 
-## 6.3 Búsqueda canario `HOLAHOLAHOLA` (Intento 5 §13)
+### 7.3 Búsqueda canario `HOLAHOLAHOLA` (Intento 5 §13)
 
 | Paso | Resultado |
 |------|-----------|
@@ -481,7 +498,7 @@ Aunque orientados también a inyección, documentan **lectura** de RAM live:
 | `strings` + `grep` | ❌ No encontrado |
 | Lección | UTF-16, compresión, buffers gráficos — **strings insuficiente** |
 
-## 6.4 Impacto PAE/NX deshabilitado (`intento2LecturaRam.md` §5)
+### 7.4 Impacto PAE/NX deshabilitado (`intento2LecturaRam.md` §5)
 
 **A nivel forense:**
 
@@ -493,23 +510,23 @@ Aunque orientados también a inyección, documentan **lectura** de RAM live:
 
 ---
 
-# 7. Metodología IV — WinDbg y lectura kernel (evaluación)
+## 8. Metodología IV — WinDbg y lectura kernel (evaluación)
 
 | Aspecto | Detalle |
 |---------|---------|
 | **Objetivo** | Lectura/depuración kernel pools BitLocker |
 | **Requisitos** | `bcdedit /set hypervisorlaunchtype off`, desactivar Defender |
-| **Resultado** | **FALLO** — excepción *Meditation Guru* VirtualBox |
+| **Resultado** | **FALLO** — excepción *Guru Meditation* VirtualBox |
 | **Decisión** | Descartado; priorizar dumps offline |
 
 ---
 
-# 8. Metodología V — Pipeline `AnalisisDeVolcados`
+## 9. Metodología V — Pipeline `AnalisisDeVolcados`
 
 **Directorio:** `AnalisisDeVolcados/`  
 **Documento agente:** `intento3LecturaRam.md` (intentos 1–5 estadísticos)
 
-## 8.1 INTENTO D-1 — Firma disco `-FVE-FS-` en RAM (`analisisVolcados.py`)
+### 9.1 INTENTO D-1 — Firma disco `-FVE-FS-` en RAM (`analisisVolcados.py`)
 
 | Campo | Detalle |
 |-------|---------|
@@ -519,7 +536,7 @@ Aunque orientados también a inyección, documentan **lectura** de RAM live:
 | **Resultado** | **INOPERANTE en RAM** |
 | **Error conceptual** | OS no copia bloque metadatos disco literalmente; usa `_FVE_CONTROL_BLOCK` en pool |
 
-## 8.2 INTENTO D-2 — Ventana deslizante + AES Key Unwrap (`probarCandidatos.py`)
+### 9.2 INTENTO D-2 — Ventana deslizante + AES Key Unwrap (`probarCandidatos.py`)
 
 | Campo | Detalle |
 |-------|---------|
@@ -528,7 +545,7 @@ Aunque orientados también a inyección, documentan **lectura** de RAM live:
 | **Variantes** | VMK normal + invertida `[::-1]` (endianness) |
 | **Resultado** | **NEGATIVO** — candidatos CSV no contenían VMK real |
 
-## 8.3 INTENTO D-3 — Inversión endianness
+### 9.3 INTENTO D-3 — Inversión endianness
 
 | Campo | Detalle |
 |-------|---------|
@@ -536,7 +553,7 @@ Aunque orientados también a inyección, documentan **lectura** de RAM live:
 | **Justificación** | x86 little-endian vs arrays criptográficos secuenciales |
 | **Resultado** | **NEGATIVO** — universo candidatos ya inválido |
 
-## 8.4 INTENTO D-4 — `range_coverage_score` (Density Testing)
+### 9.4 INTENTO D-4 — `range_coverage_score` (Density Testing)
 
 | Campo | Detalle |
 |-------|---------|
@@ -551,7 +568,7 @@ $$\text{Score}_{\text{cobertura}} = \frac{|\{b_i : count(b_i) > 0\}|}{16}$$
 
 donde $b_i$ son bins de 16 valores hex cada uno sobre ventana 32 B.
 
-## 8.5 INTENTO D-5 — Chi-cuadrado $\chi^2$ (`analisisVolcados3.py`)
+### 9.5 INTENTO D-5 — Chi-cuadrado $\chi^2$ (`analisisVolcados3.py`)
 
 | Campo | Detalle |
 |-------|---------|
@@ -562,7 +579,7 @@ donde $b_i$ son bins de 16 valores hex cada uno sobre ventana 32 B.
 | **Resultado** | ~**10⁷ candidatos** (~320 MB archivo) |
 | **Problema** | Explosión combinatoria posterior |
 
-## 8.6 Pipeline evolutivo de scripts
+### 9.6 Pipeline evolutivo de scripts
 
 ```text
 Volcados/*.elf
@@ -575,7 +592,7 @@ Volcados/*.elf
     → probarCandidatos*.py     (validación unwrap vs blob disco)
 ```
 
-## 8.7 Montaje disco VHD en Windows (`comandos.md`)
+### 9.7 Montaje disco VHD en Windows (`comandos.md`)
 
 ```powershell
 VBoxManage clonemedium disk CSAI-disk001.vdi CSAI-disk001.vhd --format VHD
@@ -591,12 +608,12 @@ manage-bde -unlock Z: -RecoveryKey llave.bek   # FRACASO documentado
 
 ---
 
-# 9. Metodología VI — Extractor híbrido `intento_romper_bitlocker`
+## 10. Metodología VI — Extractor híbrido `intento_romper_bitlocker`
 
 **Directorio:** `intento_romper_bitlocker/`  
 **Informe:** `intento_romper_bitlocker.md`
 
-## 9.1 Pipeline `extract_fvek_from_vol3.py`
+### 10.1 Pipeline `extract_fvek_from_vol3.py`
 
 **Entradas:**
 
@@ -611,7 +628,7 @@ manage-bde -unlock Z: -RecoveryKey llave.bek   # FRACASO documentado
 3. `scan_for_aes_keys()` — validación **AES Key Schedule** matemática (S-box + Rcon).
 4. Emitir JSON + blobs `.bin` + candidatos `.fvek`.
 
-## 9.2 Resultados JSON (`fvek_extraction_report.json`)
+### 10.2 Resultados JSON (`fvek_extraction_report.json`)
 
 | Región | Tallado | AES128 | AES256 | Error |
 |--------|---------|--------|--------|-------|
@@ -624,7 +641,7 @@ manage-bde -unlock Z: -RecoveryKey llave.bek   # FRACASO documentado
 
 **Conclusión:** Blobs tallados **sin key schedules AES válidos**; regiones más prometedoras (**Cngb**, **TpmP** parcial) con errores mapeo.
 
-## 9.3 Artefactos generados
+### 10.3 Artefactos generados
 
 ```text
 allocated_fve_tags.txt
@@ -638,11 +655,11 @@ memdump/pid.4.dmp
 
 ---
 
-# 10. Metodología VII — Scripts Python (tallado manual y heurísticas estadísticas)
+## 11. Metodología VII — Scripts Python (tallado manual y heurísticas estadísticas)
 
 > **Última metodología** según criterio operativo — análisis exhaustivo de heurísticas y bases estadísticas.
 
-## 10.1 Inventario completo scripts RAM/BitLocker
+### 11.1 Inventario completo scripts RAM/BitLocker
 
 | Script | Ubicación | Generación |
 |--------|-----------|------------|
@@ -662,7 +679,7 @@ memdump/pid.4.dmp
 
 ---
 
-## 10.2 `key_search.py` — Ventana contextual alrededor de hallazgo previo
+### 11.2 `key_search.py` — Ventana contextual alrededor de hallazgo previo
 
 **Heurística:** No barrido — **salto directo** a offset conocido `0xae32db16` (hallazgo agente previo con tag FVEK).
 
@@ -685,7 +702,7 @@ data = f.read(512)  # ventana [-64, +448] bytes
 
 ---
 
-## 10.3 `key_search2.py` — Búsqueda lineal firmas ASCII
+### 11.3 `key_search2.py` — Búsqueda lineal firmas ASCII
 
 **Patrones:** `b'FVEK'`, `b'VMK'`
 
@@ -701,7 +718,7 @@ data = f.read(512)  # ventana [-64, +448] bytes
 
 ---
 
-## 10.4 `key_search3.py` — Diccionario multi-firma
+### 11.4 `key_search3.py` — Diccionario multi-firma
 
 **Patrones:**
 
@@ -725,7 +742,7 @@ patterns = {
 
 ---
 
-## 10.5 `key_search4.py` — Entropía por ratio de unicidad
+### 11.5 `key_search4.py` — Entropía por ratio de unicidad
 
 **Parámetros:**
 
@@ -758,7 +775,7 @@ $$\text{entropy}_{\text{ratio}} = \frac{|\text{unique bytes}|}{32}$$
 
 ---
 
-## 10.6 `extraer_fvep.py` — Tallado por tag pool
+### 11.6 `extraer_fvep.py` — Tallado por tag pool
 
 **Heurística:** `data.find(b'FVEp')` → volcar 512 B desde tag.
 
@@ -768,7 +785,7 @@ $$\text{entropy}_{\text{ratio}} = \frac{|\text{unique bytes}|}{32}$$
 
 ---
 
-## 10.7 `extract_fvek_from_vol3.py` — Validación matemática AES Key Schedule
+### 11.7 `extract_fvek_from_vol3.py` — Validación matemática AES Key Schedule
 
 **Base estadística:** **Determinística criptográfica**, no probabilística.
 
@@ -793,7 +810,7 @@ elif 0 < len(aes256) <= 2: selected = aes256[:2]
 
 ---
 
-## 10.8 `analisisVolcados2.py` — Entropía de Shannon optimizada
+### 11.8 `analisisVolcados2.py` — Entropía de Shannon optimizada
 
 **Constantes:**
 
@@ -824,13 +841,13 @@ $$H(X) = -\sum_{i=0}^{255} p_i \log_2 p_i$$
 
 ---
 
-## 10.9 `analisisVolcados3.py` — Triple filtro estadístico
+### 11.9 `analisisVolcados3.py` — Triple filtro estadístico
 
-### 10.9.1 Filtro 1: Entropía Shannon > 4.5
+#### 11.9.1 Filtro 1: Entropía Shannon > 4.5
 
 (Idéntico a analisisVolcados2.)
 
-### 10.9.2 Filtro 2: Entropía modular de diferencias (`modular_diff_entropy`)
+#### 11.9.2 Filtro 2: Entropía modular de diferencias (`modular_diff_entropy`)
 
 **Definición:** Para ventana $w[0..31]$, calcular diferencias circulares:
 
@@ -846,7 +863,7 @@ Entropía Shannon sobre histograma de $d_i$.
 - Estructuras ordenadas (tablas, punteros) → diferencias pequeñas repetidas → entropía baja.
 - Filtra secuencias `00 10 20 30...` que pasaban χ² de cobertura binaria.
 
-### 10.9.3 Filtro 3: Chi-cuadrado uniformidad
+#### 11.9.3 Filtro 3: Chi-cuadrado uniformidad
 
 ```python
 CHI2_UNIFORMITY_MAX = 30.6
@@ -862,7 +879,7 @@ con 16 bins (byte // 16), $E_j = 32/16 = 2.0$.
 
 - Para 16 bins y $E=2$, distribución uniforme esperada $\chi^2 \approx 15$ (df=15) en el límite ideal.
 - Texto/estructuras → $\chi^2 > 100$.
-- 30.6 es **corte empírico** entre ruido estructural y aleatoriedad criptográfica — ligeramente permisivo para no perder claves con ligera asimetria muestral.
+- 30.6 es **corte empírico** entre ruido estructural y aleatoriedad criptográfica — ligeramente permisivo para no perder claves con ligera asimetría muestral.
 
 **Distribución teórica referencia:**
 
@@ -873,7 +890,7 @@ con 16 bins (byte // 16), $E_j = 32/16 = 2.0$.
 | Punteros x64 | 80–200 | 3.5–4.0 | 2.0–3.0 |
 | Ceros/FF padding | >150 | <1.0 | <1.0 |
 
-### 10.9.4 Complejidad combinatoria resultante
+#### 11.9.4 Complejidad combinatoria resultante
 
 Documentado en `intento3LecturaRam.md`:
 
@@ -887,7 +904,7 @@ $$\text{Ops}_{\text{unwrap}} = 10^7 \times 10^6 \times 2 \approx 2 \times 10^{13
 
 ---
 
-## 10.10 `candidatos.py` — Intersección multi-volcado
+### 11.10 `candidatos.py` — Intersección multi-volcado
 
 **Heurística clave:** Candidato válido solo si aparece en **todos** los CSV (CSAI1, CSAI2, CSAI3).
 
@@ -902,7 +919,7 @@ $$\text{Ops}_{\text{unwrap}} = 10^7 \times 10^6 \times 2 \approx 2 \times 10^{13
 
 ---
 
-## 10.11 `candidatos2.py` — SQLite WAL intersección
+### 11.11 `candidatos2.py` — SQLite WAL intersección
 
 **Optimización:** Base SQLite con flags `p2`, `p3` por presencia en volcado 2/3.
 
@@ -910,7 +927,7 @@ $$\text{Ops}_{\text{unwrap}} = 10^7 \times 10^6 \times 2 \approx 2 \times 10^{13
 
 ---
 
-## 10.12 `candidatos3.py` — Merge ordenado multiproceso
+### 11.12 `candidatos3.py` — Merge ordenado multiproceso
 
 **Entrada:** 3 archivos `.bin` de 32 B/registro (salida analisisVolcados3).
 
@@ -926,7 +943,7 @@ $$\text{Ops}_{\text{unwrap}} = 10^7 \times 10^6 \times 2 \approx 2 \times 10^{13
 
 ---
 
-## 10.13 `probarCandidatos.py` — Validación criptográfica AES-KW
+### 11.13 `probarCandidatos.py` — Validación criptográfica AES-KW
 
 **Heurística final:** Único test con **significado criptográfico definitivo**:
 
@@ -940,7 +957,7 @@ Si no lanza excepción → par VMK/FVEK válido.
 
 ---
 
-## 10.14 Evolución de umbrales estadísticos (tabla maestra)
+### 11.14 Evolución de umbrales estadísticos (tabla maestra)
 
 | Script | Métrica | Umbral | Tipo | Justificación |
 |--------|---------|--------|------|---------------|
@@ -955,9 +972,9 @@ Si no lanza excepción → par VMK/FVEK válido.
 
 ---
 
-# 11. Intento de montaje en Kali Linux / Windows host
+## 12. Intento de montaje en Kali Linux / Windows host
 
-## 11.1 Flujo objetivo Kali
+### 12.1 Flujo objetivo Kali
 
 ```bash
 sudo dislocker -V /dev/sdb4 -k <LLAVE_RAM> -- /mnt/bitlocker
@@ -965,7 +982,7 @@ sudo dislocker -V /dev/sdb4 -k <LLAVE_RAM> -- /mnt/bitlocker
 bdemount -k FVEK -t TWEAK ...
 ```
 
-## 11.2 Intentos documentados
+### 12.2 Intentos documentados
 
 | Plataforma | Acción | Resultado |
 |------------|--------|-----------|
@@ -974,7 +991,7 @@ bdemount -k FVEK -t TWEAK ...
 | Windows | `manage-bde -unlock Z: -RecoveryKey llave.bek` | ❌ (`comandos.md`: "no funciona") |
 | Windows | Candidatos `.fvek` extract_fvek | ❌ Sin validación exitosa |
 
-## 11.3 Estado frente a objetivo
+### 12.3 Estado frente a objetivo
 
 ```text
 PARCIAL — evidencia BitLocker en RAM confirmada
@@ -983,9 +1000,9 @@ NO COMPLETADO — montaje volumen con clave extraída
 
 ---
 
-# 12. Análisis integrado de resultados
+## 13. Análisis integrado de resultados
 
-## 12.1 Matriz global de intentos de lectura RAM
+### 13.1 Matriz global de intentos de lectura RAM
 
 | # | Fuente informe | Metodología | ID | Resultado clave |
 |---|----------------|-------------|-----|-----------------|
@@ -1012,7 +1029,7 @@ NO COMPLETADO — montaje volumen con clave extraída
 | 21 | AnalisisDeVolcados | probarCandidatos | — | ❌ Sin match |
 | 22 | intento_romper | extract_fvek vol3 | — | ❌ Missing Cngb |
 
-## 12.2 Qué funcionó
+### 13.2 Qué funcionó
 
 - Adquisición `.elf` y `.sav` en sweet spot login.
 - Validación Volatility + MemProcFS WS2025.
@@ -1022,7 +1039,7 @@ NO COMPLETADO — montaje volumen con clave extraída
 - Validador criptográfico AES schedule + AES-KW (herramientas listas).
 - Identificación metadatos disco (Key Package HxD).
 
-## 12.3 Qué no funcionó
+### 13.3 Qué no funcionó
 
 - Extracción VMK/FVEK montable.
 - Plugin BitLocker Vol3 nativo.
@@ -1031,7 +1048,7 @@ NO COMPLETADO — montaje volumen con clave extraída
 - Cruce combinatorio RAM×disco a escala 10¹³.
 - Montaje Kali/Windows con candidatos generados.
 
-## 12.4 Evaluación global (`Intento5LecturaRam.md`)
+### 13.4 Evaluación global (`Intento5LecturaRam.md`)
 
 ```text
 PARCIALMENTE EXITOSA
@@ -1041,9 +1058,9 @@ Confirmada presencia material criptográfico; **no** recuperada clave utilizable
 
 ---
 
-# 13. Problemas encontrados y lecciones aprendidas
+## 14. Problemas encontrados y lecciones aprendidas
 
-## 13.1 Missing memmap page
+### 14.1 Missing memmap page
 
 | Causa | Efecto | Mitigación propuesta |
 |-------|--------|---------------------|
@@ -1051,7 +1068,7 @@ Confirmada presencia material criptográfico; **no** recuperada clave utilizable
 | Memmap PID4 incompleto | Blobs parciales | memmap global + pid específico fvevol |
 | VA canonicalización | Offsets erróneos | Usar canonical48() |
 
-## 13.2 Explosión combinatoria
+### 14.2 Explosión combinatoria
 
 | Fase | Magnitud |
 |------|----------|
@@ -1061,15 +1078,15 @@ Confirmada presencia material criptográfico; **no** recuperada clave utilizable
 
 **Lección:** Filtro estadístico necesario pero **insuficiente** sin ancla estructural (BigPools, Key Package disco).
 
-## 13.3 Error conceptual Intento D-1
+### 14.3 Error conceptual Intento D-1
 
 Buscar `-FVE-FS-` (firma **disco**) en RAM — **invalido**. RAM contiene objetos kernel, no sectores VBR.
 
-## 13.4 Windows Server 2025 soporte herramientas
+### 14.4 Windows Server 2025 soporte herramientas
 
 Build 26100 extremadamente reciente → plugins Vol2 obsoletos, Vol3 incompleto, MemProcFS mejor pero sin parser BitLocker.
 
-## 13.5 Ofuscación BitLocker en memoria (`intento3` §3)
+### 14.5 Ofuscación BitLocker en memoria (`intento3` §3)
 
 1. Non-Paged Pool aislado (no pagefile).
 2. XOR dinámico VMK en reposo (anti cold boot).
@@ -1077,7 +1094,7 @@ Build 26100 extremadamente reciente → plugins Vol2 obsoletos, Vol3 incompleto,
 
 ---
 
-# 14. Mapeo MITRE ATT&CK
+## 15. Mapeo MITRE ATT&CK
 
 | Técnica | ID | Aplicación |
 |---------|-----|------------|
@@ -1089,9 +1106,9 @@ Build 26100 extremadamente reciente → plugins Vol2 obsoletos, Vol3 incompleto,
 
 ---
 
-# 15. Conclusiones y líneas futuras
+## 16. Conclusiones y líneas futuras
 
-## 15.1 Conclusión
+### 16.1 Conclusión
 
 La fase de **lectura RAM para romper BitLocker** demostró:
 
@@ -1099,7 +1116,7 @@ La fase de **lectura RAM para romper BitLocker** demostró:
 2. **Viabilidad práctica parcial** — adquisición y reconocimiento exitosos; extracción clave bloqueada.
 3. **Bloqueo principal** — Missing memmap pages en regiones Cngb/TpmP + ausencia parser BitLocker WS2025.
 
-## 15.2 Prioridades siguientes
+### 16.2 Prioridades siguientes
 
 | Prioridad | Acción |
 |-----------|--------|
@@ -1109,13 +1126,13 @@ La fase de **lectura RAM para romper BitLocker** demostró:
 | 🟡 | Combinar `.sav` (TPM state) + `.elf` (RAM) |
 | 🟡 | Alinear barrido χ² a paso 16 B fijo |
 | 🟡 | Anclar unwrap solo a Key Package disco (<5 blobs) |
-| 🟢 | Pivot inyección RAM / bypass offline utilman |
+| 🟢 | Pivote hacia inyección RAM / bypass offline utilman |
 
 ---
 
-# 16. Anexos
+## 17. Anexos
 
-## Anexo A — Comandos Volatility consolidados
+### Anexo A — Comandos Volatility consolidados
 
 ```powershell
 cd ForensicToolbox\volatility3
@@ -1126,7 +1143,7 @@ py vol.py -r csv -f ..\..\CSAI.elf windows.bigpools.BigPools --tags FVEp,FVEx,FV
 py vol.py -o memdump -f ..\..\CSAI.elf windows.memmap.Memmap --pid 4 --dump
 ```
 
-## Anexo B — Comandos adquisición
+### Anexo B — Comandos adquisición
 
 ```powershell
 VBoxManage debugvm "CSAI" dumpvmcore --filename=memoria.elf
@@ -1134,21 +1151,21 @@ VBoxManage controlvm "CSAI" savestate
 MemProcFS.exe -f CSAI.elf -mount M:
 ```
 
-## Anexo C — Fuentes documentales
+### Anexo C — Fuentes documentales
 
 | Archivo | Contenido |
 |---------|-----------|
 | `Intentos/intento1LecturaRam.md` | Adquisición .elf/.sav/GDB L.1–L.5 |
 | `Intentos/intento2LecturaRam.md` | dumpvmcore, Volatility V-1–V-6, PAE/NX |
 | `Intentos/intento3LecturaRam.md` | Pipeline estadístico D-1–D-5, χ² |
-| `Intentos/intento4LecutraRam.md` | MemProcFS, migración Windows |
+| `Intentos/intento4LecturaRam.md` | MemProcFS, migración Windows |
 | `Intentos/Intento5LecturaRam.md` | Cronología completa BitLocker RAM |
 | `intento_romper_bitlocker.md` | extract_fvek, artefactos CSV |
 | `recopilacion2.md` | Esquema secciones 1–2 |
 | `recopilacionLecturaRam.md` | Síntesis previa |
 | `Analisis_MemProcFS_elf/*` | Informes agente MemProcFS |
 
-## Anexo D — Glosario
+### Anexo D — Glosario
 
 | Término | Definición |
 |---------|------------|
@@ -1167,3 +1184,31 @@ MemProcFS.exe -f CSAI.elf -mount M:
 **Fin del informe — `recopilacionLecturaRamDefinitiva.md`**
 
 *Ejercicio Red Team vs Blue Team CSAI 2025. Entorno aislado Host-Only. Uso educativo.*
+
+### Anexo E — Intentos fallidos de extracción de secretos de RAM
+
+A continuación se detallan de forma estructurada los intentos fallidos llevados a cabo para extraer las claves criptográficas de BitLocker (`VMK`, `FVEK`) desde la memoria RAM del sistema comprometido:
+
+1. **Volatility 3 (Plugin nativo `windows.bitlocker` y comunitarios):**
+   - **Intento:** Ejecutar la extracción automática de la clave FVEK de `fvevol.sys` mediante Volatility 3.
+   - **Resultado:** Falló debido a la falta de soporte integrado para el plugin de BitLocker en la versión 3 (solo disponible en la versión 2). Los intentos de adaptar o descargar plugins alternativos fallaron por enlaces obsoletos (errores 404) y desalineación con la API de Volatility 3.
+
+2. **Búsqueda lineal en disco (`strings` y `grep` en Save State `.sav`):**
+   - **Intento:** Localizar canarios de prueba (como la contraseña `HOLAHOLAHOLA` o firmas `FVE-SET` y `IOCTL_FVE`) directamente en el archivo de estado guardado `.sav` de VirtualBox.
+   - **Resultado:** Ningún hallazgo en texto plano. Se determinó que VirtualBox 7.x comprime el estado de la RAM con el algoritmo **LZF**, lo que impide la lectura directa sin descompresión.
+
+3. **Volatility 3 (`windows.memmap` + tallado de BigPools en PID 4):**
+   - **Intento:** Traducir las direcciones virtuales de las etiquetas de asignación de memoria (*tags* como `Cngb`, `TpmP`, `FVEp`, `FVE0`) a direcciones físicas para extraer su contenido binario del volcado `pid.4.dmp`.
+   - **Resultado:** Se encontraron errores del tipo **Missing memmap page** en regiones críticas (especialmente en `Cngb` y `TpmP`), lo que impidió recuperar los bloques de memoria donde el sistema almacena las claves.
+
+4. **Pipeline `AnalisisDeVolcados` (Búsqueda de la firma `-FVE-FS-`):**
+   - **Intento:** Desarrollar scripts de Python (`analisisVolcados.py`) para buscar la firma del sector de arranque de BitLocker `-FVE-FS-` directamente en la RAM.
+   - **Resultado:** Inoperante por error conceptual. Dicha firma pertenece a los metadatos en disco y no se mapea tal cual en la memoria del sistema dinámico, donde se emplean estructuras kernel tipo `_FVE_CONTROL_BLOCK`.
+
+5. **Alineación estadística y Fuerza Bruta (`probarCandidatos.py` + AES-KW):**
+   - **Intento:** Filtrar candidatos de clave mediante entropía Shannon (umbral $>4.5$), Chi-cuadrado ($\chi^2 \leq 30.6$) y diferencias modulares para reducir falsos positivos, y aplicarles un test de desempaquetado de claves AES Key Wrap (RFC 3394) contra el Key Package del disco.
+   - **Resultado:** El número de candidatos resultantes ($10^7$ candidatos) generó una explosión combinatoria inasumible ($\approx 2 \times 10^{13}$ operaciones de unwrap) sin un filtro de anclaje más preciso. Ninguno de los candidatos probados logró montar el volumen.
+
+6. **Depuración en vivo vía GDB Stub de VirtualBox (`inyectar.py`/`inyectar.ps1`):**
+   - **Intento:** Leer y escribir la memoria física de la VM en caliente mediante tramas del protocolo RSP de GDB en el puerto 1234.
+   - **Resultado:** Los comandos de lectura y escritura en la región física `0x7B9AF5C` (dirección del kernel) y `0x2DEDD0F0` (página de login) fallaron de forma sistemática arrojando errores `$E81` (acceso denegado) o provocando múltiples interrupciones `SIGTRAP ($T05)` debido a la protección de páginas de solo lectura (EPT/W^X) aplicadas por la MMU de la máquina virtual.

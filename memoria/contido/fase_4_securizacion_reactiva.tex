@@ -1,11 +1,106 @@
 \chapter[Fase 4: Securización Reactiva]{Fase 4: Securización Reactiva y Mejora de la Calidad}
 \label{chap:fase_4_securizacion_reactiva}
 
+En este capítulo se expone el Análisis de Causa Raíz (RCA) detallado del compromiso de seguridad identificado en el servidor de producción, seguido del plan estratégico de remediación inmediata, la actualización de las políticas de telemetría sin depender de plataformas externas como Wazuh, y el establecimiento de un bucle cerrado de endurecimiento continuo (\textit{hardening}) mediante sesiones agénticas apoyadas en el protocolo MCP (\textit{Model Context Protocol}). Finalmente, se definen métricas y KPIs clave que permitirán verificar y mantener el nivel de seguridad del sistema frente a amenazas futuras.
+
 \section[Análisis de Causa Raíz (RCA)]{Análisis de Causa Raíz (RCA) del incidente}
 \label{sec:causa_raiz}
+
+El análisis forense digital realizado en la Fase 3 confirmó que el servidor \texttt{WIN-VNQSUL89MUA} sufrió un compromiso el 25 de marzo de 2026. A continuación, se desglosa el análisis de causa raíz estructurado del incidente:
+
+\begin{enumerate}
+    \item \textbf{Vector de Entrada y Mecanismo de Acceso:} El \textit{Red Team} obtuvo acceso a la interfaz física de la máquina virtual (consola de VirtualBox) utilizando credenciales válidas de la cuenta de administración \texttt{user2}. La sesión de inicio fue registrada en el log de seguridad de Windows con el evento \texttt{ID 4624} y \texttt{LogonType 2} (inicio de sesión interactivo local).
+    \item \textbf{Evasión de Contención de Red:} Aunque el \textit{Blue Team} había endurecido el perímetro eliminando OpenSSH y configurando políticas de firewall de bloqueo estricto entrante/saliente mediante el script \texttt{nuke.ps1}, estas defensas perimetrales no mitigaron el acceso interactivo local en consola.
+    \item \textbf{Brecha de Telemetría (Punto Ciego de Sysmon):} Durante el ataque, Sysmon registró más de 2,600 eventos de registro (IDs 12 y 13), pero \textbf{cero eventos de creación de procesos} (\texttt{Event ID 1}). La investigación técnica reveló que la configuración activa de Sysmon (\texttt{WinNetSvc.xml}) estaba diseñada exclusivamente para auditar procesos hijos del servidor web IIS (\texttt{w3wp.exe}) y herramientas selectas de movimiento lateral. Este filtrado omitió los procesos iniciados directamente en la shell interactiva de la consola local.
+    \item \textbf{Impacto y Persistencia en el Host:} Al no ser auditados los procesos de consola, el atacante desactivó el Firewall de Windows (\texttt{netsh advfirewall set allprofiles state off}) y el cifrado de disco BitLocker (\texttt{manage-bde -off C:}). Posteriormente, creó la cuenta de respaldo \texttt{yishiego} (perteneciente al grupo local \texttt{Administradores}) con la contraseña estática expuesta en texto plano \texttt{EstuveAqui.1234}.
+    \item \textbf{Acción de Limpieza Volátil:} El atacante finalizó la sesión ejecutando \texttt{shutdown /s /t 0}. Este apagado inmediato tuvo como objetivo eliminar los antiguos artefactos volátiles de la memoria RAM, impidiendo la adquisición y análisis de memoria posterior (lo cual forzó a realizar el análisis forense en base a los archivos persistentes de log en disco y el archivo \texttt{ConsoleHost\_history.txt} del perfil de administrador).
+\end{enumerate}
 
 \section[Remediación y Políticas]{Remediación (refactorización, parcheo y políticas)}
 \label{sec:remediacion}
 
+Para contrarrestar el compromiso y prevenir vectores similares, se establece un plan de remediación estructurado en tres niveles tácticos: remediación inmediata, endurecimiento de la telemetría local (Sysmon) y automatización del hardening agéntico mediante MCP.
+
+\subsection{Saneamiento y Contención Inmediata}
+Las tareas de saneamiento inmediato sobre el host comprometido incluyen:
+\begin{itemize}
+    \item \textbf{Eliminación de Cuentas Backdoor:} Se elimina de forma permanente el usuario \texttt{yishiego} del sistema mediante el comando:
+\begin{lstlisting}
+net user yishiego /delete
+\end{lstlisting}
+    \item \textbf{Rotación de Credenciales:} Se cambia la contraseña del usuario administrador legítimo \texttt{user2} implementando directivas de longitud (mínimo 16 caracteres), complejidad y caducidad.
+    \item \textbf{Restablecimiento del Firewall (manteniendo el canal MCP) y BitLocker:} Se reactiva el Firewall de Windows en todos los perfiles de red garantizando, de manera prioritaria, la existencia de reglas que permitan el tráfico entrante hacia el puerto SSH (\texttt{TCP 22}) y el puerto alternativo de MCP-SSE (\texttt{TCP 8000}). Esto es crítico dado que la mayor parte de las gestiones se realizarán mediante sesiones agénticas vía el canal MCP, por lo que interrumpir la conectividad debe evitarse a toda costa y considerarse estrictamente como último recurso. Asimismo, se habilita nuevamente el cifrado de unidad BitLocker en la partición de sistema \texttt{C:}, forzando la custodia de las claves de recuperación.
+    \item \textbf{Saneamiento del Canal de Gestión SSH y MCP:} Para posibilitar las auditorías remotas del \textit{Blue Team} sin comprometer la comunicación de los agentes de IA, se sanitiza el archivo \texttt{administrators\_authorized\_keys} de OpenSSH, asegurando la preservación de la clave pública del agente para no provocar una desconexión accidental. Asimismo, se mantiene el cambio de la clave de registro de OpenSSH \texttt{DefaultShell} a \texttt{cmd.exe} para evitar la corrupción de bytes y del flujo \texttt{JSON-RPC} inducidos por PowerShell.
+\end{itemize}
+
+\subsection{Actualización de Políticas de Telemetría con Sysmon}
+Dado que el entorno de despliegue no cuenta con la infraestructura del SIEM Wazuh para alertas centralizadas, toda la detección reactiva debe descansar sobre el almacenamiento y procesamiento de eventos locales de Windows y Sysmon. Para corregir el punto ciego de la consola interactiva, se refactoriza el archivo de configuración \texttt{WinNetSvc.xml} agregando un grupo de reglas que fuerce la auditoría de procesos interactivos locales (\texttt{LogonType 2}):
+
+\begin{lstlisting}
+<Sysmon schemaversion="4.50">
+  <EventFiltering>
+    <RuleGroup name="Interactive Console Audit" groupRelation="or">
+      <ProcessCreate onmatch="include">
+        <!-- Captura de consolas locales y shells de comandos -->
+        <ParentImage condition="image">powershell.exe</ParentImage>
+        <ParentImage condition="image">cmd.exe</ParentImage>
+        <Image condition="image">powershell.exe</Image>
+        <Image condition="image">cmd.exe</Image>
+        <Image condition="image">pwsh.exe</Image>
+        <!-- Auditoria de herramientas de gestion critica -->
+        <OriginalFileName condition="is">net.exe</OriginalFileName>
+        <OriginalFileName condition="is">net1.exe</OriginalFileName>
+        <OriginalFileName condition="is">netsh.exe</OriginalFileName>
+        <OriginalFileName condition="is">manage-bde.exe</OriginalFileName>
+        <OriginalFileName condition="is">sc.exe</OriginalFileName>
+      </ProcessCreate>
+    </RuleGroup>
+  </EventFiltering>
+</Sysmon>
+\end{lstlisting}
+
+\subsection{Políticas de Hardening Continuo Mediante Sesiones Agénticas via MCP}
+Para garantizar que las políticas de seguridad se mantengan estables a lo largo del tiempo, se define una arquitectura defensiva basada en \textbf{sesiones agénticas autónomas}. Utilizando el servidor MCP (\textit{Model Context Protocol}) restaurado y verificado (operando sobre SSH y con puerto de contingencia SSE \texttt{8000}), un agente de IA interactúa de forma periódica o disparado por eventos para realizar tareas de auditoría y remediación en caliente en la máquina virtual.
+
+El flujo operacional del agente MCP se basa en la ejecución de un Playbook de Hardening estructurado mediante herramientas lógicas:
+\begin{itemize}
+    \item \textbf{Herramienta \texttt{check\_local\_users}:} Ejecuta una comparación del listado de cuentas con privilegios administrativos locales respecto a una lista blanca (\textit{whitelist}) predefinida (ej. \texttt{user2}). Cualquier desviación (como la aparición de \texttt{yishiego} u otros SIDs sospechosos) dispara una alerta y la eliminación inmediata del usuario.
+    \item \textbf{Herramienta \texttt{enforce\_firewall}:} Audita que el Firewall de Windows esté activo y con sus políticas de bloqueo entrante activas, asegurando explícitamente la persistencia de las reglas para SSH y MCP-SSE para prevenir la auto-desconexión del canal de gestión. En caso de desactivación, el agente la restablece de forma autónoma.
+    \item \textbf{Herramienta \texttt{enforce\_bitlocker}:} Comprueba el estado de cifrado de la partición del sistema y reporta desviaciones si se detecta que el volumen se encuentra descifrado o en proceso de descifrado.
+    \item \textbf{Herramienta \texttt{audit\_ssh\_keys}:} Compara el \textit{hash} SHA-256 del archivo \texttt{administrators\_authorized\_keys} con el registro de claves autorizadas del equipo de operaciones para descartar llaves públicas inyectadas por atacantes persistentes, protegiendo siempre la integridad de la llave de sesión del agente gestor para evitar su exclusión.
+\end{itemize}
+
+El acoplamiento técnico de estas herramientas al servidor MCP local de la máquina virtual se ilustra a continuación:
+
+\begin{figure}[htbp]
+    \centering
+    \begin{minipage}{0.9\textwidth}
+    \centering
+    \texttt{[Agente IA (Host)] <--- (JSON-RPC sobre SSH/CMD o SSE:8000) ---> [Servidor MCP (VM)]}
+    \end{minipage}
+    \caption{Arquitectura de comunicación y orquestación agéntica MCP para remediación reactiva.}
+    \label{fig:arquitectura_mcp}
+\end{figure}
+
 \section[Métricas de Calidad y KPIs]{Definición de Métricas de Calidad y KPIs futuros}
 \label{sec:metricas_kpis}
+
+Para evaluar la efectividad y la resiliencia del sistema tras las medidas aplicadas, se proponen los siguientes indicadores clave de rendimiento (KPIs) orientados a la securización reactiva y al canal agéntico:
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabular}{|p{4.5cm}|p{5.5cm}|p{2.2cm}|p{1.8cm}|}
+\hline
+\textbf{KPI y Nombre} & \textbf{Definición y Fórmula} & \textbf{Frecuencia} & \textbf{Objetivo} \\ \hline
+\textbf{MTTR-A} \newline (Mean Time to Agentic Remediation) & Tiempo medio transcurrido desde que se modifica un control crítico (firewall deshabilitado, usuario creado) hasta que el agente MCP lo remedia. & Ante cada desviación & $< 5$ minutos \\ \hline
+\textbf{TCH} \newline (Tasa de Cumplimiento de Hardening) & Porcentaje de controles críticos activos sobre el total de controles definidos en las políticas de hardening. \newline Fórmula: $\frac{\text{Controles conformes}}{\text{Total controles}} \times 100$ & Semanal & $100\%$ \\ \hline
+\textbf{CECI} \newline (Cobertura de Eventos de Consola Interactiva) & Proporción de comandos interactivos iniciados bajo LogonType 2 auditados de forma efectiva por Sysmon. & Mensual & $100\%$ \\ \hline
+\textbf{FCMCP} \newline (Fiabilidad del Canal MCP) & Porcentaje de sesiones del protocolo MCP completadas con éxito sin interrupción del stream stdio. \newline Fórmula: $\frac{\text{Conexiones exitosas}}{\text{Sesiones iniciadas}} \times 100$ & Semanal & $> 99\%$ \\ \hline
+\textbf{FAA} \newline (Frecuencia de Auditoría Agéntica) & Frecuencia con la que el agente IA escanea de forma proactiva el host para comprobar controles de seguridad. & Diaria / Evento & Mínimo 1 diaria \\ \hline
+\end{tabular}
+\caption{Matriz de Métricas de Calidad y KPIs para el mantenimiento de la postura de seguridad.}
+\label{tab:kpis_seguridad}
+\end{table}
+
+Con la implementación de este marco de métricas y la automatización mediante sesiones agénticas MCP, se asegura una postura de seguridad proactiva y resistente que compensa la ausencia de supervisión centralizada mediante SIEM/Wazuh en el host comprometido.
