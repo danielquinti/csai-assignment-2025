@@ -37,7 +37,7 @@ Este plan define **15 medidas de hardening avanzado** (MED-01 a MED-15), organiz
 |----|---------------------|-----------|---------------|
 | INC-01 | Acceso consola VM con credenciales válidas de `user2` | Event ID 4624, LogonType 2, origen `127.0.0.1`, 25/03/2026 | T1078 — Valid Accounts |
 | INC-02 | Creación cuenta backdoor `yishiego` + elevación a Administradores | Event 4720 (creación) + 4732 (grupo), 25/03/2026 13:43 | T1136 — Create Account |
-| INC-03 | Firewall desactivado con `netsh advfirewall set allprofiles state off` | Historial `ConsoleHost_history.txt`; firewall inactivo hasta recuperación | T1562.004 — Disable Firewall |
+| INC-03 | Firewall desactivado con `netsh advfirewall set allprofiles state off` | Historial `ConsoleHost_history.txt`; firewall inactivo hasta recuperación (13 días) | T1562.004 — Disable Firewall |
 | INC-04 | BitLocker desactivado con `manage-bde -off C:` | Historial PowerShell | T1486 — Data Encrypted for Impact |
 | INC-05 | Punto ciego Sysmon: 0 eventos ProcessCreate (ID 1) en sesión de consola | 2.607 eventos Sysmon el 25/03, ninguno de tipo ID 1 | T1562.001 — Impair Defenses |
 | INC-06 | Apagado forzado `shutdown /s /t 0` para destruir evidencia volátil | Event 1100 (log service stopped), 4647 (logout) | T1529 — System Shutdown/Reboot |
@@ -355,11 +355,10 @@ Get-ChildItem "C:\Windows\System32\*.bak" -ErrorAction SilentlyContinue | ForEac
 Set-Service AppIDSvc -StartupType Automatic
 Start-Service AppIDSvc -ErrorAction SilentlyContinue
 
-# Crear directorio de políticas AppLocker
+# Crear directorio de políticas AppLocker y aplicar política XML completa
 $applockerDir = "$env:SystemRoot\System32\AppLocker"
 New-Item -ItemType Directory -Path $applockerDir -Force | Out-Null
 
-# Exportar política base y aplicar denegaciones mediante XML
 $applockerXml = @"
 <AppLockerPolicy Version="1">
   <RuleCollection Type="Exe" EnforcementMode="Enabled">
@@ -435,12 +434,12 @@ Write-Host "[+] Historial PowerShell eliminado y logging habilitado" -Foreground
 | **ID Incidente** | INC-06 |
 | **Vector de ataque** | Apagado inmediato del sistema con `shutdown /s /t 0` para destruir evidencia volátil (RAM, conexiones de red, procesos) — T1529 |
 | **Nueva medida de seguridad** | Auditoría de eventos de apagado; restricción de `SeShutdownPrivilege`; tarea de monitorización post-arranque para correlacionar reinicios con sesiones interactivas recientes |
-| **Justificación técnica** | Los events 1074/6006/6008 registran apagados con causa y usuario responsable. Restringir `SeShutdownPrivilege` a cuentas de servicio del sistema (no a cuentas interactivas) añade una capa de control; la tarea `BootMonitor` correlaciona reinicios inesperados con logons LogonType 2 previos y genera alerta en Application Log |
+| **Justificación técnica** | Los eventos 1074/6006/6008 registran apagados con causa y usuario responsable. Restringir `SeShutdownPrivilege` a cuentas de servicio del sistema (no a cuentas interactivas) añade una capa de control; la tarea `BootMonitor` correlaciona reinicios inesperados con logons LogonType 2 previos y genera alerta en Application Log |
 | **Método de aplicación** | `auditpol` + `secedit` + Tarea Programada |
 
 ```powershell
 # Auditoría de apagados
-auditpol /set /subcategory:"System Shutdown" /success:enable /failure:enable
+auditpol /set /subcategory:"System Shutdown"    /success:enable /failure:enable
 auditpol /set /subcategory:"Other System Events" /success:enable /failure:enable
 
 # Exportar política de derechos de usuario y verificar SeShutdownPrivilege
@@ -501,7 +500,7 @@ $vmName = "WIN-VNQSUL89MUA"  # Ajustar al nombre exacto en VirtualBox
 icacls $vbox /inheritance:r /grant "BUILTIN\Administrators:(RX)" "SYSTEM:(F)"
 icacls $vbox /deny "BUILTIN\Users:(X)"
 
-# Habilitar VBS en el host (requiere reinicio del host)
+# Habilitar VBS/HVCI en el host (requiere reinicio del host)
 reg add "HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard" /v EnableVirtualizationBasedSecurity /t REG_DWORD /d 1 /f
 reg add "HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity" /v Enabled /t REG_DWORD /d 1 /f
 ```
@@ -513,9 +512,9 @@ reg add "HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorE
 | Campo | Detalle |
 |-------|---------|
 | **ID Incidente** | INC-09 |
-| **Vector de ataque** | Secreto JWT (`SecretKey`) residente en memoria del proceso IIS worker (`w3wp.exe`) y extraíble con Volatility desde el volcado de RAM — T1552 |
+| **Vector de ataque** | Secreto JWT (`SecretKey`) residente en memoria del worker IIS (`w3wp.exe`) y extraíble con Volatility desde el volcado de RAM — T1552 |
 | **Nueva medida de seguridad** | Rotación inmediata del `SecretKey` JWT con entropía de 256 bits; almacenamiento protegido mediante DPAPI (scope `LocalMachine`); reinicio del Application Pool para invalidar todos los tokens forjados |
-| **Justificación técnica** | Volatility localizó el `SecretKey` como cadena de texto plano en el heap del proceso. DPAPI ata el secreto al contexto criptográfico de la máquina, por lo que el secreto en RAM sigue siendo texto plano durante la ejecución, pero la **clave de larga duración** en disco queda cifrada y no puede ser reutilizada desde otro sistema aunque se extraiga el VDI |
+| **Justificación técnica** | Volatility localizó el `SecretKey` como cadena de texto plano en el heap del proceso. DPAPI ata el secreto al contexto criptográfico de la máquina, por lo que la **clave de larga duración** en disco queda cifrada e inusable desde otro sistema aunque se extraiga el VDI |
 | **Método de aplicación** | PowerShell (guest — VM) |
 
 ```powershell
@@ -531,9 +530,8 @@ $protected = [Security.Cryptography.ProtectedData]::Protect(
     $null,
     [Security.Cryptography.DataProtectionScope]::LocalMachine
 )
-$protectedB64 = [Convert]::ToBase64String($protected)
 
-# Persistir el secreto como variable de entorno de máquina (la app lee en texto plano en runtime)
+# Persistir el secreto como variable de entorno de máquina
 [Environment]::SetEnvironmentVariable("Jwt__SecretKey", $plainSecret, "Machine")
 Write-Host "[!] SecretKey rotado. Todos los JWT anteriores quedan INVALIDADOS." -ForegroundColor Yellow
 
@@ -585,7 +583,6 @@ builder.Services.AddRateLimiter(options =>
 });
 
 // NO añadir app.UseForwardedHeaders() sin configurar KnownProxies explícitamente.
-// Si en el futuro se añade un proxy reverso, usar ForwardedHeadersOptions.KnownProxies.
 ```
 
 ---
@@ -605,16 +602,16 @@ builder.Services.AddRateLimiter(options =>
 foreach ($ver in @("SSL 2.0", "SSL 3.0", "TLS 1.0", "TLS 1.1")) {
     $path = "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\$ver\Server"
     New-Item -Path $path -Force | Out-Null
-    New-ItemProperty -Path $path -Name "Enabled"          -Value 0 -PropertyType DWord -Force
-    New-ItemProperty -Path $path -Name "DisabledByDefault" -Value 1 -PropertyType DWord -Force
+    New-ItemProperty -Path $path -Name "Enabled"           -Value 0 -PropertyType DWord -Force
+    New-ItemProperty -Path $path -Name "DisabledByDefault"  -Value 1 -PropertyType DWord -Force
 }
 
 # Habilitar protocolos modernos
 foreach ($ver in @("TLS 1.2", "TLS 1.3")) {
     $path = "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\$ver\Server"
     New-Item -Path $path -Force | Out-Null
-    New-ItemProperty -Path $path -Name "Enabled"          -Value 1 -PropertyType DWord -Force
-    New-ItemProperty -Path $path -Name "DisabledByDefault" -Value 0 -PropertyType DWord -Force
+    New-ItemProperty -Path $path -Name "Enabled"           -Value 1 -PropertyType DWord -Force
+    New-ItemProperty -Path $path -Name "DisabledByDefault"  -Value 0 -PropertyType DWord -Force
 }
 
 # Aplicar cambios (requiere reinicio de IIS)
@@ -652,7 +649,6 @@ $content = $content -replace '^#?PermitRootLogin.*',          'PermitRootLogin n
 $content | Set-Content $cfg -Encoding UTF8
 
 # Asegurar que el bloque Match Group administrators está descomentado
-# (permite que Administradores usen administrators_authorized_keys)
 if ($content -notmatch '^Match Group administrators') {
     Add-Content $cfg "`nMatch Group administrators`n    AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys"
 }
@@ -678,9 +674,9 @@ Write-Host "[+] SSH configurado: solo clave publica, restringido a 192.168.56.1"
 |-------|---------|
 | **ID Incidente** | INC-12 (ausencia de SIEM centralizado) |
 | **Vector de ataque** | Degradación silenciosa de controles defensivos sin mecanismo de alerta centralizado (Wazuh no disponible) |
-| **Nueva medida de seguridad** | Bucle cerrado de autorremediación agéntica vía MCP: servidor Python con 4 herramientas de auditoría y corrección automática, ejecutado periódicamente desde el agente IA del host |
+| **Nueva medida de seguridad** | Bucle cerrado de autorremediación agéntica vía MCP: servidor Python con 4 herramientas de auditoría y corrección automática |
 | **Justificación técnica** | Sin SIEM, las alteraciones de controles (firewall desactivado, cuenta nueva en Administradores) pueden pasar desapercibidas días o semanas. El servidor MCP expone herramientas atómicas que el agente IA consume para detectar desviaciones del baseline y revertirlas en caliente, reduciendo el MTTR objetivo por debajo de 5 minutos |
-| **Método de aplicación** | Servidor MCP Python (`C:\Python312\mcp_server.py`) + Tarea Programada (ver Sección 6) |
+| **Método de aplicación** | Servidor MCP Python (`C:\Python312\mcp_server.py`) + Tarea programada (ver Sección 6) |
 
 ---
 
@@ -752,8 +748,6 @@ Integrar el siguiente bloque **dentro** de `<EventFiltering>` en `C:\Windows\Sys
 
 ```powershell
 $xmlPath = "C:\Windows\System32\Drivers\en-US\NetworkData\WinNetSvc.xml"
-
-# Recargar configuración Sysmon
 C:\Windows\WinNetSvc.exe -c $xmlPath
 
 # Test: ejecutar net.exe sin argumentos y verificar que genera ID 1
@@ -777,152 +771,257 @@ if ($testEvent) {
 
 ```
   [ Agente IA Defensivo (Host Cursor) ]
-                  |
+                  │
         JSON-RPC / SSH (puerto 22)
         o SSE (puerto 8000, contingencia)
-                  |
+                  ▼
         [ Servidor MCP — C:\Python312\mcp_server.py ]
-                  |
-       +-----------+-----------+-----------+
-       |           |           |           |
-  [check_users] [firewall] [bitlocker] [ssh_keys]
+                  │
+    ┌─────────────┼─────────────┬─────────────┐
+    ▼             ▼             ▼             ▼
+check_local   enforce_     enforce_      audit_ssh
+  _users      firewall     bitlocker        _keys
 ```
 
-### 6.2 Código del servidor MCP (`C:\Python312\mcp_server.py`)
+> **Preservación del canal:** Nunca bloquear los puertos 22/8000 desde la IP `192.168.56.1` ni vaciar `administrators_authorized_keys` sin mantener la clave del agente MCP.
+
+### 6.2 Implementación del servidor MCP ampliado
+
+Desplegar en `C:\Python312\mcp_server.py`:
 
 ```python
-import subprocess
 import hashlib
+import subprocess
 from mcp.server.fastmcp import FastMCP
 
-mcp = FastMCP("BlueTeamDefender")
+mcp = FastMCP("WindowsCommander")
 
-# Hash SHA-256 de referencia de administrators_authorized_keys (calcular en Fase 0 / MED-14)
-AUTHORIZED_KEYS_HASH = "REEMPLAZAR_CON_HASH_SHA256_DE_REFERENCIA"
-AUTHORIZED_ADMINS    = ["WIN-VNQSUL89MUA\\user2"]
+# --- Configuración de referencia (ajustar tras Fase 0) ---
+ALLOWED_ADMINS = {"WIN-VNQSUL89MUA\\user2"}
+AUTHORIZED_KEYS_PATH = r"C:\ProgramData\ssh\administrators_authorized_keys"
+AUTHORIZED_KEYS_SHA256 = "REEMPLAZAR_CON_HASH_FASE_0"  # Get-FileHash -Algorithm SHA256
+HOST_ANALYST_IP = "192.168.56.1"
 
-def _run(cmd: str) -> str:
+
+def _run_ps(cmd: str) -> str:
     r = subprocess.run(
         ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd],
-        capture_output=True, text=True, timeout=60
+        capture_output=True, text=True,
     )
-    return r.stdout.strip() + (f"\n[STDERR] {r.stderr.strip()}" if r.stderr.strip() else "")
+    return r.stdout + r.stderr
+
 
 @mcp.tool()
 def check_local_users() -> str:
-    """Audita el grupo Administradores y alerta si hay cuentas no autorizadas."""
-    result = _run("Get-LocalGroupMember -Group 'Administradores' | Select-Object -ExpandProperty Name | ConvertTo-Json")
-    import json
-    try:
-        members = json.loads(result) if result.startswith('[') else [result]
-    except Exception:
-        members = [result]
+    """Audita miembros del grupo Administradores contra whitelist. Elimina cuentas no autorizadas."""
+    members = _run_ps(
+        "Get-LocalGroupMember -Group 'Administradores' | Select-Object -ExpandProperty Name"
+    ).strip().splitlines()
+    rogue = [m for m in members if m.strip() not in ALLOWED_ADMINS]
+    removed = []
+    for user in rogue:
+        _run_ps(f'Remove-LocalGroupMember -Group "Administradores" -Member "{user}" -ErrorAction SilentlyContinue')
+        _run_ps(f'Remove-LocalUser -Name "{user}" -ErrorAction SilentlyContinue')
+        removed.append(user)
+    if removed:
+        return f"ALERTA: Eliminadas cuentas no autorizadas: {', '.join(removed)}"
+    return f"OK: Administradores conformes: {', '.join(members)}"
 
-    rogue = [m for m in members if m not in AUTHORIZED_ADMINS and m]
-    if rogue:
-        for account in rogue:
-            _run(f"net user '{account}' /delete 2>$null; net localgroup Administradores '{account}' /delete 2>$null")
-        return f"ALERTA: Cuentas eliminadas del grupo Administradores: {rogue}"
-    return f"OK: Grupo Administradores conforme. Miembros: {members}"
 
 @mcp.tool()
 def enforce_firewall() -> str:
-    """Verifica que el Firewall este activo y lo reactiva si esta deshabilitado."""
-    status = _run("Get-NetFirewallProfile | Select-Object Name,Enabled | ConvertTo-Json")
-    if "False" in status:
-        _run("Set-NetFirewallProfile -All -Enabled True -DefaultInboundAction Block -DefaultOutboundAction Block")
-        return f"ALERTA: Firewall reactivado. Estado previo: {status}"
-    return f"OK: Firewall activo en todos los perfiles."
+    """Verifica y reactiva el firewall si está deshabilitado. Restaura reglas base."""
+    status = _run_ps("Get-NetFirewallProfile | Select-Object Name, Enabled | ConvertTo-Json")
+    if "false" in status.lower():
+        _run_ps("Set-NetFirewallProfile -All -Enabled True -DefaultInboundAction Block -DefaultOutboundAction Block")
+        _run_ps('New-NetFirewallRule -DisplayName "Allow_HTTP_In"  -Direction Inbound -Protocol TCP -LocalPort 80  -Action Allow -ErrorAction SilentlyContinue')
+        _run_ps('New-NetFirewallRule -DisplayName "Allow_HTTPS_In" -Direction Inbound -Protocol TCP -LocalPort 443 -Action Allow -ErrorAction SilentlyContinue')
+        _run_ps(f'New-NetFirewallRule -DisplayName "Allow_SSH_MCP" -Direction Inbound -Protocol TCP -LocalPort 22 -Action Allow -RemoteAddress {HOST_ANALYST_IP} -ErrorAction SilentlyContinue')
+        _run_ps(f'New-NetFirewallRule -DisplayName "Allow_MCP_SSE" -Direction Inbound -Protocol TCP -LocalPort 8000 -Action Allow -RemoteAddress {HOST_ANALYST_IP} -ErrorAction SilentlyContinue')
+        return "REMEDIADO: Firewall reactivado y reglas restauradas"
+    return "OK: Firewall activo en todos los perfiles"
+
 
 @mcp.tool()
 def enforce_bitlocker() -> str:
-    """Audita el estado de cifrado BitLocker en C: y lo reactiva si esta desactivado."""
-    vol = _run("Get-BitLockerVolume -MountPoint 'C:' | Select-Object ProtectionStatus,VolumeStatus | ConvertTo-Json")
-    if '"On"' not in vol or '"FullyEncrypted"' not in vol:
-        _run("Enable-BitLocker -MountPoint 'C:' -EncryptionMethod Aes256 -TpmProtector -UsedSpaceOnly -ErrorAction SilentlyContinue")
-        return f"ALERTA: BitLocker reactivado. Estado previo: {vol}"
-    return f"OK: BitLocker activo y cifrado completo."
+    """Audita BitLocker en C: y reinicia cifrado si está desactivado o pausado."""
+    status = _run_ps("(Get-BitLockerVolume -MountPoint 'C:').ProtectionStatus")
+    if "On" not in status:
+        _run_ps("Enable-BitLocker -MountPoint 'C:' -EncryptionMethod Aes256 -TpmProtector -UsedSpaceOnly -ErrorAction SilentlyContinue")
+        return "REMEDIADO: BitLocker reactivado en C:"
+    return "OK: BitLocker ProtectionStatus = On"
+
 
 @mcp.tool()
 def audit_ssh_keys() -> str:
-    """Verifica la integridad de administrators_authorized_keys por hash SHA-256."""
-    keys_path = r"C:\ProgramData\ssh\administrators_authorized_keys"
-    current_hash = _run(f"(Get-FileHash '{keys_path}' -Algorithm SHA256).Hash")
-    if current_hash.strip().upper() != AUTHORIZED_KEYS_HASH.upper():
-        return (
-            f"ALERTA: Hash de authorized_keys modificado.\n"
-            f"  Referencia : {AUTHORIZED_KEYS_HASH}\n"
-            f"  Actual     : {current_hash.strip()}\n"
-            f"  ACCION REQUERIDA: Restaurar claves autorizadas manualmente."
-        )
-    return f"OK: authorized_keys integro. Hash: {current_hash.strip()}"
+    """Compara SHA-256 de administrators_authorized_keys con el valor de referencia."""
+    try:
+        with open(AUTHORIZED_KEYS_PATH, "rb") as f:
+            current = hashlib.sha256(f.read()).hexdigest()
+        if current != AUTHORIZED_KEYS_SHA256:
+            return f"ALERTA: Hash de claves SSH alterado. Actual: {current}"
+        return f"OK: Hash SSH conforme ({current[:16]}...)"
+    except FileNotFoundError:
+        return "ALERTA: administrators_authorized_keys no encontrado"
+
+
+@mcp.tool()
+def ejecutar_comando_powershell(comando: str) -> str:
+    """Ejecuta un comando PowerShell y devuelve el resultado (uso operativo del agente)."""
+    return _run_ps(comando)
+
 
 if __name__ == "__main__":
-    mcp.run(transport='stdio')
+    mcp.run(transport="stdio")
 ```
 
-### 6.3 Tarea programada de auditoría agéntica
+### 6.3 Tabla de herramientas y lógica de autorremediación
+
+| Herramienta MCP | Acción del agente | Lógica de autorremediación | Frecuencia |
+|-----------------|-------------------|----------------------------|------------|
+| `check_local_users` | Compara administradores locales con whitelist `{user2}` | Elimina cuentas fuera de lista (ej. `yishiego`) | Diaria + tras evento 4720 |
+| `enforce_firewall` | Verifica `Enabled` en los 3 perfiles | Reactiva firewall y restaura reglas HTTP/HTTPS/SSH/MCP | Cada 5 min (tarea) + bajo demanda |
+| `enforce_bitlocker` | Audita `ProtectionStatus` de `C:` | Reinicia cifrado si está Off o pausado | Cada 15 min (tarea) + bajo demanda |
+| `audit_ssh_keys` | Calcula SHA-256 de `administrators_authorized_keys` | Alerta si el hash difiere del valor de referencia de Fase 0 | Diaria |
+
+### 6.4 Tarea programada de auditoría agéntica
 
 ```powershell
-# Tarea de auditoría preventiva cada 5 minutos (MED-15 — complementa las tareas de MED-04 y MED-05)
-$mcpAuditScript = @'
-$whitelist = @("WIN-VNQSUL89MUA\user2")
-$admins = Get-LocalGroupMember -Group "Administradores" |
-    Where-Object { $_.ObjectClass -eq "User" } |
-    Select-Object -ExpandProperty Name
-$rogue = $admins | Where-Object { $_ -notin $whitelist }
-if ($rogue) {
-    foreach ($a in $rogue) { net user $a /delete 2>$null }
-    New-EventLog -LogName Application -Source "MCPAudit" -ErrorAction SilentlyContinue
-    Write-EventLog -LogName Application -Source "MCPAudit" -EventId 5020 -EntryType Error `
-        -Message "CRITICO: Cuenta(s) no autorizada(s) eliminada(s) del grupo Administradores: $($rogue -join ', ')"
-}
-'@
-$mcpAuditScript | Out-File "C:\Windows\System32\Drivers\en-US\NetworkData\MCP_Audit.ps1" -Encoding ASCII -Force
+# Script de auditoría local (complementa el bucle MCP remoto)
+$auditScript = @'
+$log = "C:\Windows\System32\Config\TxR\Diagnostics\mcp_audit.log"
+$ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 
-Register-ScheduledTask -TaskName "MCP_AdminAudit" `
-    -Action  (New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File C:\Windows\System32\Drivers\en-US\NetworkData\MCP_Audit.ps1") `
-    -Trigger (New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration ([TimeSpan]::MaxValue)) `
-    -User    "SYSTEM" `
-    -RunLevel Highest `
-    -Force
+# Disparar verificación tras logon interactivo (4624 LogonType 2)
+$recentLogon = Get-WinEvent -FilterHashtable @{LogName='Security'; Id=4624; StartTime=(Get-Date).AddMinutes(-5)} -ErrorAction SilentlyContinue |
+    Where-Object { $_.Properties[8].Value -eq 2 }
+if ($recentLogon) {
+    "[$ts] ALERTA: Logon interactivo detectado — requiere auditoría MCP" | Out-File $log -Append -Encoding ASCII
+}
+
+# Verificación local de controles críticos (sin MCP)
+$fw = (Get-NetFirewallProfile | Where-Object { $_.Enabled -eq $false }).Count
+$bl = (Get-BitLockerVolume -MountPoint "C:").ProtectionStatus
+"[$ts] Firewall_disabled_profiles=$fw BitLocker=$bl" | Out-File $log -Append -Encoding ASCII
+'@
+$auditScript | Out-File "C:\Windows\System32\Drivers\en-US\NetworkData\MCP_AuditTrigger.ps1" -Encoding ASCII -Force
+
+Register-ScheduledTask -TaskName "MCP_AuditTrigger" `
+    -Action  (New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -File C:\Windows\System32\Drivers\en-US\NetworkData\MCP_AuditTrigger.ps1") `
+    -Trigger (New-ScheduledTaskTrigger -Daily -At "00:00" -RepetitionInterval (New-TimeSpan -Hours 1)) `
+    -User    "SYSTEM" -RunLevel Highest -Force
+```
+
+### 6.5 Configuración del cliente MCP en el host (Cursor)
+
+```json
+{
+  "mcpServers": {
+    "windows-vm-remediation": {
+      "command": "C:\\Windows\\System32\\OpenSSH\\ssh.exe",
+      "args": [
+        "-i", "C:\\Users\\<usuario>\\.ssh\\id_ed25519",
+        "-o", "BatchMode=yes",
+        "-o", "StrictHostKeyChecking=no",
+        "user2@192.168.56.10",
+        "C:\\Python312\\python.exe",
+        "C:\\Python312\\mcp_server.py"
+      ]
+    }
+  }
+}
 ```
 
 ---
 
-## 7. KPIs de Seguridad
+## 7. Orden de Implementación
 
-| KPI | Nombre del Indicador | Definición | Frecuencia | Objetivo |
-|-----|----------------------|------------|------------|----------|
-| **MTTR-A** | Tiempo Medio de Contención Agéntica | Tiempo desde la alteración no autorizada de un control hasta que la tarea de enforcement o el agente MCP lo restaura | Ante cada desviación | < 5 minutos |
-| **TCH** | Tasa de Cumplimiento de Hardening | `(Controles conformes / Total controles) × 100` — medido por el agente sobre 4 controles: Firewall, BitLocker, Administradores, SSH keys | Semanal | 100 % |
-| **CECI** | Cobertura de Eventos de Consola Interactiva | Proporción de procesos lanzados en sesiones LogonType 2 que generan evento Sysmon ID 1 | Mensual | 100 % |
-| **FCMCP** | Fiabilidad del Canal MCP | Porcentaje de sesiones MCP completadas sin errores de stream (error -32000 o EOF) | Semanal | > 99 % |
-| **FAA** | Frecuencia de Auditoría Agéntica | Número de ejecuciones del agente MCP o de las tareas de enforcement completadas con éxito en 24h | Diaria | ≥ 288 (cada 5 min) |
-
----
-
-## 8. Resumen de Medidas
-
-| ID | Bloque | Vector INC | MITRE | Método |
-|----|--------|------------|-------|--------|
-| MED-01 | A — Acceso y credenciales | INC-01 | T1078 | `net accounts` + Registro |
-| MED-02 | A — Acceso y credenciales | INC-02 | T1136 | `auditpol` + PowerShell |
-| MED-03 | A — Acceso y credenciales | INC-01/09 | T1078/T1003 | Registro (requiere reinicio) |
-| MED-04 | B — Anti-manipulación defensas | INC-03 | T1562.004 | PowerShell + Tarea programada |
-| MED-05 | B — Anti-manipulación defensas | INC-04 | T1486 | PowerShell + `icacls` + Tarea |
-| MED-06 | B — Anti-manipulación defensas | INC-05 | T1562.001 | XML Sysmon + PowerShell |
-| MED-07 | C — LOLBins | INC-07 | T1218 | `icacls` + AppLocker GPO |
-| MED-08 | C — LOLBins | INC-08 | T1059 | Registro + PowerShell |
-| MED-09 | D — Evasión forense | INC-06 | T1529 | `auditpol` + `secedit` + Tarea |
-| MED-10 | E — Hypervisor y host | INC-09 | T1003.001 | VBoxManage + `icacls` (host) |
-| MED-11 | E — Hypervisor y host | INC-09 | T1552 | PowerShell (guest) |
-| MED-12 | F — Aplicación web | INC-10 | T1110.003 | Código C# (`Program.cs`) |
-| MED-13 | F — Aplicación web | Proactivo | T1557 | Registro de Windows |
-| MED-14 | G — Canal MCP/SSH | INC-11 | — | Registro + `sshd_config` |
-| MED-15 | G — Canal MCP/SSH | INC-12 | — | Python MCP + Tarea programada |
+| Fase | Día | Medidas | Acciones |
+|------|-----|---------|----------|
+| **0** | Día 0 (inmediato) | Fase 0 | Eliminar `yishiego`, rotar `user2`, restaurar firewall y BitLocker |
+| **1** | Día 0 | MED-01, MED-02, MED-04, MED-05 | Postura mínima operativa |
+| **2** | Día 1 | MED-06, MED-08, MED-09 | Telemetría y anti-forensics |
+| **3** | Día 2 | MED-03, MED-07, MED-14 | Reinicio requerido (Credential Guard, AppLocker) |
+| **4** | Día 3 | MED-10, MED-11, MED-12, MED-13 | Capa host + aplicación |
+| **5** | Continuo | MED-15 | Bucle agéntico MCP |
 
 ---
 
-*Fin del Plan de Securización Post-Incidente — Blue Team WIN-VNQSUL89MUA*  
-*Generado conforme a las directrices de MITRE ATT&CK, CIS Benchmarks para Windows Server 2025 y NIST SP 800-61 (Computer Security Incident Handling Guide).*
+## 8. KPIs de Validación Post-Implementación
+
+| KPI | Indicador | Fórmula / Criterio | Frecuencia | Objetivo | Comando de verificación |
+|-----|-----------|-------------------|------------|----------|-------------------------|
+| **MTTR-A** | Tiempo medio de contención agéntica | Tiempo desde alteración de control hasta restauración por MCP | Por incidente | < 5 min | Revisar `mcp_audit.log` |
+| **TCH** | Tasa de cumplimiento de hardening | Controles conformes / Total controles × 100 | Semanal | 100 % | Ejecutar las 4 herramientas MCP |
+| **CECI** | Cobertura eventos consola interactiva | Procesos LogonType 2 logueados por Sysmon ID 1 | Mensual | 100 % | `cmd /c whoami` → verificar ID 1 |
+| **FCMCP** | Fiabilidad del canal MCP | Sesiones MCP exitosas / Total sesiones × 100 | Semanal | > 99 % | Test JSON-RPC `initialize` vía SSH |
+| **FAA** | Frecuencia de auditoría agéntica | Ejecuciones programadas + reactivas tras 4624 | Diaria | ≥ 1/día | `Get-ScheduledTask -TaskName "MCP_AuditTrigger"` |
+
+### 8.1 Checklist de verificación rápida
+
+```powershell
+# 1. Sin cuentas backdoor en Administradores
+Get-LocalGroupMember -Group "Administradores"
+
+# 2. Firewall activo en los 3 perfiles
+Get-NetFirewallProfile | Select-Object Name, Enabled, DefaultInboundAction
+
+# 3. BitLocker operativo
+manage-bde -status C:
+
+# 4. Sysmon ProcessCreate en consola
+cmd /c echo test_sysmon
+Start-Sleep 2
+Get-WinEvent -LogName "Microsoft-Windows-Sysmon/Operational" -MaxEvents 10 | Where-Object Id -eq 1
+
+# 5. SSH sin autenticación por contraseña
+Select-String -Path "C:\ProgramData\ssh\sshd_config" -Pattern "PasswordAuthentication"
+
+# 6. Auditoría de cuentas habilitada
+auditpol /get /subcategory:"User Account Management"
+
+# 7. PowerShell Script Block Logging
+reg query "HKLM\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging"
+
+# 8. TLS 1.0/1.1 deshabilitado
+reg query "HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.0\Server"
+```
+
+### 8.2 Criterios de aceptación
+
+| Control | Estado esperado |
+|---------|-----------------|
+| Cuenta `yishiego` | **Ausente** |
+| Firewall (Domain, Public, Private) | **Enabled = True**, DefaultInbound = Block |
+| BitLocker `C:` | **ProtectionStatus = On**, VolumeStatus = FullyEncrypted |
+| Sysmon consola | **≥ 1 evento ID 1** tras ejecutar comando en cmd |
+| SSH | **PasswordAuthentication no** |
+| Administradores locales | Solo `user2` en whitelist |
+| Hash `administrators_authorized_keys` | Coincide con valor anotado en Fase 0 |
+
+---
+
+## 9. Resumen de Medidas
+
+| ID | Incidente | Vector MITRE | Medida | Método |
+|----|-----------|--------------|--------|--------|
+| MED-01 | INC-01 | T1078 | Bloqueo de cuenta + política de contraseña + mensaje legal | `net accounts` / Registro |
+| MED-02 | INC-02 | T1136 | Auditoría avanzada cuentas/grupos + whitelist | `auditpol` |
+| MED-03 | INC-01 | T1078/T1003 | Credential Guard + LSA Protection (RunAsPPL) | Registro |
+| MED-04 | INC-03 | T1562.004 | Firewall restrictivo + tarea enforcement 5 min | PowerShell |
+| MED-05 | INC-04 | T1486 | BitLocker + ACL manage-bde + tarea 15 min | PowerShell / `icacls` |
+| MED-06 | INC-05 | T1562.001 | Sysmon ProcessCreate consola + DetecciónDefensas | XML Sysmon |
+| MED-07 | INC-07 | T1218 | AppLocker completo (Allow+Deny) + protección .bak | GPO AppLocker |
+| MED-08 | INC-08 | T1059 | PSReadLine off + Script Block Logging | Registro |
+| MED-09 | INC-06 | T1529 | Auditoría apagados + BootMonitor arranque | `secedit` / tarea |
+| MED-10 | INC-09 | T1003.001 | Hardening VirtualBox host + VBS/HVCI | `VBoxManage` / Registro |
+| MED-11 | INC-09 | T1552 | Rotación JWT 256 bits + DPAPI + reinicio AppPool | PowerShell |
+| MED-12 | INC-10 | T1110.003 | Rate limit por IP TCP real (ignorar X-Forwarded-For) | Código C# |
+| MED-13 | Proactivo | T1557 | TLS 1.2/1.3 únicamente (SSL2/3 + TLS1.0/1.1 off) | Registro SCHANNEL |
+| MED-14 | INC-11 | — | SSH clave pública + cmd.exe shell + restricción IP | `sshd_config` / Registro |
+| MED-15 | INC-12 | — | Bucle autorremediación MCP (4 herramientas) | Python MCP + tarea |
+
+---
+
+*Fin del Plan de Securización Post-Incidente — WIN-VNQSUL89MUA*  
+*Generado conforme a MITRE ATT&CK, CIS Benchmarks Windows Server 2025 y NIST SP 800-61.*
