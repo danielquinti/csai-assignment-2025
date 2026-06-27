@@ -1,106 +1,366 @@
 \chapter[Fase 4: Securización Reactiva]{Fase 4: Securización Reactiva y Mejora de la Calidad}
 \label{chap:fase_4_securizacion_reactiva}
 
-En este capítulo se expone el Análisis de Causa Raíz (RCA) detallado del compromiso de seguridad identificado en el servidor de producción, seguido del plan estratégico de remediación inmediata, la actualización de las políticas de telemetría sin depender de plataformas externas como Wazuh, y el establecimiento de un bucle cerrado de endurecimiento continuo (\textit{hardening}) mediante sesiones agénticas apoyadas en el protocolo MCP (\textit{Model Context Protocol}). Finalmente, se definen métricas y KPIs clave que permitirán verificar y mantener el nivel de seguridad del sistema frente a amenazas futuras.
+El análisis forense del capítulo anterior confirmó el compromiso del servidor \texttt{WIN-VNQSUL89MUA} por el \textit{Red Team}. En respuesta, el \textit{Blue Team} ejecutó una remediación estructurada mediante un agente LLM en Cursor, conectado a la máquina virtual por el protocolo \textit{MCP}. Las diez medidas defensivas MS-01 a MS-10 cerraron los vectores identificados en la investigación. La VM permanece en \textbf{modo entrega}: controles de identidad, cifrado, telemetría y \textit{App Control} activos, con gestión remota cerrada y exposición de red limitada al tráfico web de \textit{SecureCatalog}.
 
 \section[Análisis de Causa Raíz (RCA)]{Análisis de Causa Raíz (RCA) del incidente}
 \label{sec:causa_raiz}
 
-El análisis forense digital realizado en la Fase 3 confirmó que el servidor \texttt{WIN-VNQSUL89MUA} sufrió un compromiso el 25 de marzo de 2026. A continuación, se desglosa el análisis de causa raíz estructurado del incidente:
+El capítulo~\ref{chap:fase_3_analisis_forense} documentó el compromiso del servidor \texttt{WIN-VNQSUL89MUA} (\texttt{192.168.56.10}) el \textbf{25 de marzo de 2026}. La evidencia forense descartó un vector web y confirmó acceso interactivo local (LogonType~2) desde la consola de VirtualBox con credenciales válidas de \texttt{user2}. El análisis de causa raíz trasciende el punto de entrada: identifica las debilidades que permitieron desactivar controles perimetrales, implantar persistencia y destruir evidencia volátil en una sesión de aproximadamente dieciséis minutos.
 
-\begin{enumerate}
-    \item \textbf{Vector de Entrada y Mecanismo de Acceso:} El \textit{Red Team} obtuvo acceso a la interfaz física de la máquina virtual (consola de VirtualBox) utilizando credenciales válidas de la cuenta de administración \texttt{user2}. La sesión de inicio fue registrada en el log de seguridad de Windows con el evento \texttt{ID 4624} y \texttt{LogonType 2} (inicio de sesión interactivo local).
-    \item \textbf{Evasión de Contención de Red:} Aunque el \textit{Blue Team} había endurecido el perímetro eliminando OpenSSH y configurando políticas de firewall de bloqueo estricto entrante/saliente mediante el script \texttt{nuke.ps1}, estas defensas perimetrales no mitigaron el acceso interactivo local en consola.
-    \item \textbf{Brecha de Telemetría (Punto Ciego de Sysmon):} Durante el ataque, Sysmon registró más de 2,600 eventos de registro (IDs 12 y 13), pero \textbf{cero eventos de creación de procesos} (\texttt{Event ID 1}). La investigación técnica reveló que la configuración activa de Sysmon (\texttt{WinNetSvc.xml}) estaba diseñada exclusivamente para auditar procesos hijos del servidor web IIS (\texttt{w3wp.exe}) y herramientas selectas de movimiento lateral. Este filtrado omitió los procesos iniciados directamente en la shell interactiva de la consola local.
-    \item \textbf{Impacto y Persistencia en el Host:} Al no ser auditados los procesos de consola, el atacante desactivó el Firewall de Windows (\texttt{netsh advfirewall set allprofiles state off}) y el cifrado de disco BitLocker (\texttt{manage-bde -off C:}). Posteriormente, creó la cuenta de respaldo \texttt{yishiego} (perteneciente al grupo local \texttt{Administradores}) con la contraseña estática expuesta en texto plano \texttt{EstuveAqui.1234}.
-    \item \textbf{Acción de Limpieza Volátil:} El atacante finalizó la sesión ejecutando \texttt{shutdown /s /t 0}. Este apagado inmediato tuvo como objetivo eliminar los antiguos artefactos volátiles de la memoria RAM, impidiendo la adquisición y análisis de memoria posterior (lo cual forzó a realizar el análisis forense en base a los archivos persistentes de log en disco y el archivo \texttt{ConsoleHost\_history.txt} del perfil de administrador).
-\end{enumerate}
+A continuación se desglosan los diez vectores de ataque (V-01 a V-10) vinculados a evidencia concreta recogida en la Fase~3.
 
-\section[Remediación y Políticas]{Remediación (refactorización, parcheo y políticas)}
+\subsubsection{V-01 --- Acceso consola VirtualBox con \texttt{user2}}
+El vector de entrada principal fue el acceso físico a la consola de la máquina virtual con credenciales del administrador local camuflado \texttt{user2}. El registro de Seguridad registró dos inicios de sesión interactivos (evento ID~4624, LogonType~2, origen \texttt{127.0.0.1}) el día del incidente. El endurecimiento preventivo de la Fase~1 contenía el acceso remoto, pero no segregaba privilegios en consola: el atacante operó con capacidades administrativas completas desde el primer logon. La cuenta operativa sin privilegios \texttt{user1} figuraba como pendiente del despliegue inicial y no se había materializado.
+
+\subsubsection{V-02 --- Último usuario visible en pantalla de logon}
+La pantalla de inicio de sesión mostraba el último usuario autenticado, facilitando el reconocimiento de cuentas válidas ante un adversario con acceso físico. La directiva \texttt{dontdisplaylastusername} figuraba como pendiente del bastionado inicial, de modo que LogonUI revelaba que \texttt{user2} era una cuenta activa en el sistema, reduciendo el espacio de búsqueda de credenciales a una sola contraseña.
+
+\subsubsection{V-03 --- Firewall desactivado}
+El historial de PowerShell del perfil de \texttt{user2} documentó la ejecución de \texttt{netsh advfirewall set allprofiles state off}. Esta acción anuló la contención de red impuesta por el script \texttt{nuke.ps1}, que restringía el tráfico entrante a los puertos HTTP y HTTPS. No quedó registro en el log de Seguridad porque Sysmon no capturaba procesos de consola interactiva en ese momento (véase V-06).
+
+\subsubsection{V-04 --- BitLocker desactivado}
+En la misma sesión, el atacante ejecutó \texttt{manage-bde -off C:}, desactivando el cifrado de volumen que protegía la confidencialidad del disco ante extracción offline del archivo \texttt{.vdi}. El estado posterior del volumen quedó como \textit{FullyDecrypted}. La utilidad \texttt{manage-bde.exe} no figuraba entre los LOLBins neutralizados en la Fase~1.
+
+\subsubsection{V-05 --- Backdoor \texttt{yishiego} en Administradores}
+El atacante creó la cuenta local \texttt{yishiego} y la elevó al grupo \texttt{Administradores} mediante \texttt{net user} y \texttt{net localgroup}. Los eventos de Seguridad ID~4720 y ID~4732 confirmaron la creación y elevación el 25/03/2026. La cuenta permanecía habilitada al momento de la recuperación forense, sin registro de uso posterior: constituía un mecanismo de persistencia para acceso futuro. Las utilidades \texttt{net.exe} y \texttt{net1.exe} tampoco estaban neutralizadas en el endurecimiento inicial.
+
+\subsubsection{V-06 --- Sysmon ciego en consola}
+Durante el periodo de exposición, Sysmon (\texttt{WinNetSvc}) registró más de 2.600 eventos, pero \textbf{cero} eventos de creación de proceso (ID~1) en sesiones de consola. La configuración activa priorizaba procesos hijos de IIS (\texttt{w3wp.exe}) y movimiento lateral web, omitiendo shells interactivas (LogonType~2). Esta brecha de telemetría impidió detectar en tiempo real la desactivación del firewall, BitLocker y la creación de cuentas desde la línea de comandos.
+
+\subsubsection{V-07 --- Secretos en historial de PowerShell}
+El archivo \texttt{ConsoleHost\_history.txt} del perfil de \texttt{user2} conservó en texto plano los comandos ejecutados por el \textit{Red Team}, incluida la contraseña de la cuenta backdoor. PSReadLine persiste el historial interactivo sin filtrado de secretos, convirtiendo este artefacto en un vector de exposición de credenciales cuando no existe registro centralizado de sesiones de consola.
+
+\subsubsection{V-08 --- Lockout débil y política de contraseñas insuficiente}
+El bastionado inicial fijó un umbral de bloqueo de diez intentos con ventana de quince minutos. Tras el compromiso, las credenciales de \texttt{user2} quedaron expuestas al adversario, anulando la eficacia de un lockout permisivo. La longitud mínima de contraseña y la complejidad no alcanzaban el nivel exigido para cuentas administrativas en un entorno post-incidente.
+
+\subsubsection{V-09 --- Apagado anti-forense}
+La secuencia de ataque finalizó con \texttt{shutdown /s /t 0}, apagando el sistema de forma inmediata (correlacionado con los eventos ID~4647 y ID~1100). Esta técnica busca destruir evidencia volátil en memoria RAM y dificultar la adquisición forense en caliente, forzando al \textit{Blue Team} a basar la reconstrucción en artefactos de disco y logs persistentes.
+
+\subsubsection{V-10 --- Reconocimiento de \textit{SecureCatalog}}
+El historial de PowerShell muestra navegación por \texttt{C:\textbackslash inetpub\textbackslash wwwroot\textbackslash SecureCatalog}, listando la estructura de la aplicación web desplegada en la Fase~1. No se detectó modificación de archivos ni exfiltración, pero el reconocimiento confirmó que un operador con sesión de consola puede leer el código y configuración de la aplicación sin restricciones NTFS adicionales. El AppPool de IIS conservaba el rol \texttt{db\_owner} en SQL Server, sobre-privilegiado respecto al mínimo necesario en producción.
+
+\section[Remediación]{Remediación}
 \label{sec:remediacion}
 
-Para contrarrestar el compromiso y prevenir vectores similares, se establece un plan de remediación estructurado en tres niveles tácticos: remediación inmediata, endurecimiento de la telemetría local (Sysmon) y automatización del hardening agéntico mediante MCP.
+La remediación aplicó una medida MS-xx por cada vector identificado, precedida de un saneamiento inmediato (eliminación de la backdoor, restauración del firewall y BitLocker, y ajuste de topología de red en el hipervisor). La tabla~\ref{tab:vector_medida} resume la trazabilidad vector--medida; los apartados siguientes documentan el estado \textbf{definitivo} de cada control en la VM en modo entrega.
 
-\subsection{Saneamiento y Contención Inmediata}
-Las tareas de saneamiento inmediato sobre el host comprometido incluyen:
-\begin{itemize}
-    \item \textbf{Eliminación de Cuentas Backdoor:} Se elimina de forma permanente el usuario \texttt{yishiego} del sistema mediante el comando:
-\begin{lstlisting}
-net user yishiego /delete
+\begin{table}[htbp]
+\centering
+\setlength{\tabcolsep}{5pt}
+\small
+\begin{tabular}{|p{0.09\textwidth}|p{0.09\textwidth}|p{0.74\textwidth}|}
+\hline
+\textbf{Vector} & \textbf{Medida} & \textbf{Resumen} \\ \hline
+V-01 & MS-01 & Cuenta \texttt{user1} operativa en consola; \texttt{user2} sin logon interactivo \\ \hline
+V-02 & MS-02 & Ocultación de último usuario y cambio rápido en LogonUI \\ \hline
+V-03 & MS-03 & Firewall activo; WDAC bloquea \texttt{netsh.exe} vía \texttt{BlueTeam\_Deny\_LOLBins} \\ \hline
+V-04 & MS-04 & BitLocker \textit{On} con TPM; GPO FVE; WDAC bloquea \texttt{manage-bde.exe} \\ \hline
+V-05 & MS-05 & Sin \texttt{yishiego}; \texttt{AdminGuard.ps1}; WDAC bloquea \texttt{net.exe} \\ \hline
+V-06 & MS-06 & Sysmon con grupo \texttt{HardeningConsolaInteractiva} en \texttt{WinNetSvc.xml} \\ \hline
+V-07 & MS-07 & Historial PS desactivado; transcripción y Script Block Logging \\ \hline
+V-08 & MS-08 & Lockout a 3 intentos; longitud mínima 16 y complejidad habilitada \\ \hline
+V-09 & MS-09 & \texttt{SeShutdownPrivilege} vacío; \texttt{ShutdownWithoutLogon=0} \\ \hline
+V-10 & MS-10 & ACLs DENY en \textit{SecureCatalog}; AppPool con mínimo privilegio SQL \\ \hline
+\end{tabular}
+\caption{Correspondencia entre vectores de ataque y medidas de securización.}
+\label{tab:vector_medida}
+\end{table}
+
+\subsection{Orquestación agéntica mediante MCP en Cursor}
+
+La remediación se ejecutó mediante un agente LLM (\textbf{Claude Sonnet}) en el IDE Cursor, conectado al servidor \textit{MCP} \texttt{windows-vm}. El flujo operativo sigue la cadena \textbf{Cursor (host)} $\rightarrow$ \textit{MCP} $\rightarrow$ \textbf{SSH} (\texttt{user2@192.168.56.10}) $\rightarrow$ \textbf{PowerShell elevado} en \texttt{WIN-VNQSUL89MUA}. La herramienta expuesta al agente, \texttt{ejecutar\_comando\_powershell}, transporta instrucciones de remediación de forma remota y trazable.
+
+La configuración del cliente MCP en el host utiliza \texttt{ssh.exe} con clave pública \texttt{id\_ed25519}, invocando \texttt{python.exe} y \texttt{mcp\_server.py} en la VM. OpenSSH tiene \texttt{DefaultShell} fijado en \texttt{cmd.exe} para evitar corrupción del flujo JSON-RPC por artefactos de PowerShell en \texttt{stdio} (restauración documentada en el capítulo~\ref{chap:fase_3_analisis_forense}). Durante la fase de securización permanecieron abiertos los puertos TCP~22 (SSH) y TCP~8000 (transporte SSE del servidor \textit{MCP}).
+
+\begin{lstlisting}[caption={Fragmento de configuración MCP en el host.}]
+{
+  "mcpServers": {
+    "windows-vm": {
+      "command": "C:\\Windows\\System32\\OpenSSH\\ssh.exe",
+      "args": [
+        "-i", "C:\\Users\\danie\\.ssh\\id_ed25519",
+        "-o", "BatchMode=yes",
+        "-o", "StrictHostKeyChecking=no",
+        "user2@192.168.56.10",
+        "C:\\Python312\\python.exe",
+        "C:\\Python312\\mcp_server.py"
+      ]
+    }
+  }
+}
 \end{lstlisting}
-    \item \textbf{Rotación de Credenciales:} Se cambia la contraseña del usuario administrador legítimo \texttt{user2} implementando directivas de longitud (mínimo 16 caracteres), complejidad y caducidad.
-    \item \textbf{Restablecimiento del Firewall (manteniendo el canal MCP) y BitLocker:} Se reactiva el Firewall de Windows en todos los perfiles de red garantizando, de manera prioritaria, la existencia de reglas que permitan el tráfico entrante hacia el puerto SSH (\texttt{TCP 22}) y el puerto alternativo de MCP-SSE (\texttt{TCP 8000}). Esto es crítico dado que la mayor parte de las gestiones se realizarán mediante sesiones agénticas vía el canal MCP, por lo que interrumpir la conectividad debe evitarse a toda costa y considerarse estrictamente como último recurso. Asimismo, se habilita nuevamente el cifrado de unidad BitLocker en la partición de sistema \texttt{C:}, forzando la custodia de las claves de recuperación.
-    \item \textbf{Saneamiento del Canal de Gestión SSH y MCP:} Para posibilitar las auditorías remotas del \textit{Blue Team} sin comprometer la comunicación de los agentes de IA, se sanitiza el archivo \texttt{administrators\_authorized\_keys} de OpenSSH, asegurando la preservación de la clave pública del agente para no provocar una desconexión accidental. Asimismo, se mantiene el cambio de la clave de registro de OpenSSH \texttt{DefaultShell} a \texttt{cmd.exe} para evitar la corrupción de bytes y del flujo \texttt{JSON-RPC} inducidos por PowerShell.
-\end{itemize}
-
-\subsection{Actualización de Políticas de Telemetría con Sysmon}
-Dado que el entorno de despliegue no cuenta con la infraestructura del SIEM Wazuh para alertas centralizadas, toda la detección reactiva debe descansar sobre el almacenamiento y procesamiento de eventos locales de Windows y Sysmon. Para corregir el punto ciego de la consola interactiva, se refactoriza el archivo de configuración \texttt{WinNetSvc.xml} agregando un grupo de reglas que fuerce la auditoría de procesos interactivos locales (\texttt{LogonType 2}):
-
-\begin{lstlisting}
-<Sysmon schemaversion="4.50">
-  <EventFiltering>
-    <RuleGroup name="Interactive Console Audit" groupRelation="or">
-      <ProcessCreate onmatch="include">
-        <!-- Captura de consolas locales y shells de comandos -->
-        <ParentImage condition="image">powershell.exe</ParentImage>
-        <ParentImage condition="image">cmd.exe</ParentImage>
-        <Image condition="image">powershell.exe</Image>
-        <Image condition="image">cmd.exe</Image>
-        <Image condition="image">pwsh.exe</Image>
-        <!-- Auditoria de herramientas de gestion critica -->
-        <OriginalFileName condition="is">net.exe</OriginalFileName>
-        <OriginalFileName condition="is">net1.exe</OriginalFileName>
-        <OriginalFileName condition="is">netsh.exe</OriginalFileName>
-        <OriginalFileName condition="is">manage-bde.exe</OriginalFileName>
-        <OriginalFileName condition="is">sc.exe</OriginalFileName>
-      </ProcessCreate>
-    </RuleGroup>
-  </EventFiltering>
-</Sysmon>
-\end{lstlisting}
-
-\subsection{Políticas de Hardening Continuo Mediante Sesiones Agénticas via MCP}
-Para garantizar que las políticas de seguridad se mantengan estables a lo largo del tiempo, se define una arquitectura defensiva basada en \textbf{sesiones agénticas autónomas}. Utilizando el servidor MCP (\textit{Model Context Protocol}) restaurado y verificado (operando sobre SSH y con puerto de contingencia SSE \texttt{8000}), un agente de IA interactúa de forma periódica o disparado por eventos para realizar tareas de auditoría y remediación en caliente en la máquina virtual.
-
-El flujo operacional del agente MCP se basa en la ejecución de un Playbook de Hardening estructurado mediante herramientas lógicas:
-\begin{itemize}
-    \item \textbf{Herramienta \texttt{check\_local\_users}:} Ejecuta una comparación del listado de cuentas con privilegios administrativos locales respecto a una lista blanca (\textit{whitelist}) predefinida (ej. \texttt{user2}). Cualquier desviación (como la aparición de \texttt{yishiego} u otros SIDs sospechosos) dispara una alerta y la eliminación inmediata del usuario.
-    \item \textbf{Herramienta \texttt{enforce\_firewall}:} Audita que el Firewall de Windows esté activo y con sus políticas de bloqueo entrante activas, asegurando explícitamente la persistencia de las reglas para SSH y MCP-SSE para prevenir la auto-desconexión del canal de gestión. En caso de desactivación, el agente la restablece de forma autónoma.
-    \item \textbf{Herramienta \texttt{enforce\_bitlocker}:} Comprueba el estado de cifrado de la partición del sistema y reporta desviaciones si se detecta que el volumen se encuentra descifrado o en proceso de descifrado.
-    \item \textbf{Herramienta \texttt{audit\_ssh\_keys}:} Compara el \textit{hash} SHA-256 del archivo \texttt{administrators\_authorized\_keys} con el registro de claves autorizadas del equipo de operaciones para descartar llaves públicas inyectadas por atacantes persistentes, protegiendo siempre la integridad de la llave de sesión del agente gestor para evitar su exclusión.
-\end{itemize}
-
-El acoplamiento técnico de estas herramientas al servidor MCP local de la máquina virtual se ilustra a continuación:
 
 \begin{figure}[htbp]
     \centering
-    \begin{minipage}{0.9\textwidth}
+    \begin{minipage}{0.92\textwidth}
     \centering
-    \texttt{[Agente IA (Host)] <--- (JSON-RPC sobre SSH/CMD o SSE:8000) ---> [Servidor MCP (VM)]}
+    \texttt{[Cursor / Agente LLM (Host)]} $\longleftrightarrow$ \texttt{[MCP windows-vm]} $\longleftrightarrow$ \texttt{[SSH :22 $\rightarrow$ PowerShell (VM)]}
     \end{minipage}
-    \caption{Arquitectura de comunicación y orquestación agéntica MCP para remediación reactiva.}
+    \caption{Arquitectura de orquestación agéntica para la remediación reactiva.}
     \label{fig:arquitectura_mcp}
 \end{figure}
+
+\subsection{MS-01 --- Separación de privilegios y cuenta operativa \texttt{user1}}
+
+\textbf{Vector mitigado:} V-01.
+
+Se implementa un modelo de separación de privilegios en el \textit{guest}: la sesión cotidiana en consola VirtualBox queda desacoplada de la identidad administrativa. La cuenta \texttt{user1} opera como miembro del grupo \texttt{Usuarios}, sin privilegios de administración local. Mediante \texttt{secedit}, el derecho \texttt{SeInteractiveLogonRight} se restringe a \texttt{user1}, de modo que el subsistema LSA solo admite inicios de sesión interactivos (LogonType~2) para esa cuenta. En paralelo, \texttt{user2} se incluye en \texttt{SeDenyInteractiveLogonRight}, impidiendo el logon en la consola gráfica. Deliberadamente \textbf{no} se modifica \texttt{SeDenyNetworkLogonRight} para \texttt{user2}, preservando el acceso SSH durante la fase de securización.
+
+Windows Hello for Business queda habilitado en política (\texttt{Enabled=1}) con \texttt{RequireSecurityDevice=0}, preparando autenticación basada en TPM sin exigir dispositivo de seguridad en el primer acceso por contraseña. El estado vigente asigna la consola a \texttt{user1}; \texttt{user2} permanece en \texttt{Administradores} como cuenta de ruptura de cristal (\textit{break-glass}).
+
+\begin{lstlisting}[caption={MS-01 --- Objetivo: alta de \texttt{user1} y restricción de logon interactivo.}]
+# MS-01 - Objetivo: separacion de privilegios en consola
+$User1Password = ConvertTo-SecureString $plainUser1 -AsPlainText -Force
+New-LocalUser -Name 'user1' -Password $User1Password `
+    -Description 'Cuenta operativa sin privilegios'
+Add-LocalGroupMember -Group 'Usuarios' -Member 'user1'
+
+secedit /export /cfg C:\Windows\Temp\sec_logon.cfg /quiet
+$cfg = Get-Content C:\Windows\Temp\sec_logon.cfg
+$cfg = $cfg -replace '^SeInteractiveLogonRight\s*=.*', 'SeInteractiveLogonRight = user1'
+$cfg = $cfg -replace '^SeDenyInteractiveLogonRight\s*=.*',
+    'SeDenyInteractiveLogonRight = user2,DefaultAccount,WDAGUtilityAccount'
+$cfg | Set-Content C:\Windows\Temp\sec_logon.cfg -Encoding Unicode
+secedit /configure /db $env:windir\security\local.sdb `
+    /cfg C:\Windows\Temp\sec_logon.cfg /areas USER_RIGHTS /quiet
+
+$whfb = 'HKLM:\SOFTWARE\Policies\Microsoft\PassportForWork'
+Set-ItemProperty -Path $whfb -Name 'Enabled' -Value 1 -Type DWord
+Set-ItemProperty -Path $whfb -Name 'RequireSecurityDevice' -Value 0 -Type DWord
+\end{lstlisting}
+
+\subsection{MS-02 --- Ocultación de cuentas en pantalla de logon}
+
+\textbf{Vector mitigado:} V-02.
+
+Se fijan de forma persistente tres valores en \texttt{HKLM\textbackslash SOFTWARE\textbackslash Microsoft\textbackslash Windows\textbackslash CurrentVersion\textbackslash Policies\textbackslash System}: \texttt{dontdisplaylastusername}, \texttt{DontDisplayLastUserName} y \texttt{HideFastUserSwitching}. Winlogon consulta estas claves al renderizar LogonUI; con ellas activas, el operador debe introducir explícitamente el nombre de usuario y se deshabilita el cambio rápido entre cuentas.
+
+\begin{lstlisting}[caption={MS-02 --- Objetivo: ocultar último usuario en LogonUI.}]
+# MS-02 - Objetivo: ocultacion pantalla de logon
+$path = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+@('dontdisplaylastusername', 'DontDisplayLastUserName', 'HideFastUserSwitching') |
+    ForEach-Object { Set-ItemProperty -Path $path -Name $_ -Value 1 -Type DWord -Force }
+gpupdate /force
+\end{lstlisting}
+
+\subsection{MS-03 --- Protección contra desactivación del Firewall}
+
+\textbf{Vector mitigado:} V-03.
+
+Los tres perfiles de Windows Defender Firewall permanecen habilitados con acción predeterminada de bloqueo entrante y saliente. Las claves de política en \texttt{HKLM\textbackslash SOFTWARE\textbackslash Policies\textbackslash Microsoft\textbackslash WindowsFirewall} refuerzan que el servicio MPSSVC no acepte desactivación persistente.
+
+Durante la fase de gestión agéntica se desplegó \texttt{Enforce-Firewall.ps1} con la tarea \texttt{BlueTeam\_FirewallEnforce}, que cada cinco minutos ---como \texttt{NT AUTHORITY\textbackslash SYSTEM}--- restauraba el firewall y las reglas operativas (HTTP, HTTPS, SSH y \textit{MCP}) salvo que existiera el marcador \texttt{.modo\_entrega}. Esta tarea se desregistra al ejecutar \texttt{Cierre-Operativo.ps1} (véase la subsección~\ref{subsec:cierre_operativo}).
+
+La política WDAC \texttt{BlueTeam\_Deny\_LOLBins} impide la ejecución de \texttt{netsh.exe}. Se generó fusionando la plantilla \texttt{AllowAll.xml} con reglas \textit{Deny} a nivel \textit{FilePublisher} mediante \texttt{Merge-CIPolicy}; el XML resultante se convirtió a binario \texttt{.cip} con \texttt{ConvertFrom-CIPolicy} y se desplegó en modo \textit{enforce} con \texttt{CiTool.exe} tras reinicio. En modo entrega, el firewall conserva reglas entrantes limitadas a TCP~80 y TCP~443; la política WDAC sobre \texttt{netsh.exe} permanece vigente.
+
+\begin{lstlisting}[caption={MS-03 --- Objetivo: refuerzo de firewall y política WDAC consolidada.}]
+# MS-03 - Objetivo: Enforce-Firewall.ps1 + BlueTeam_Deny_LOLBins
+$scriptPath = 'C:\Windows\System32\Drivers\en-US\NetworkData\Enforce-Firewall.ps1'
+Register-ScheduledTask -TaskName 'BlueTeam_FirewallEnforce' ...  # cada 5 min, SYSTEM
+
+Import-Module ConfigCI
+$allowAllCopy = 'C:\Windows\Temp\wdac_work\AllowAll.xml'
+Copy-Item (Join-Path $env:windir 'schemas\CodeIntegrity\ExamplePolicies\AllowAll.xml') `
+    $allowAllCopy -Force
+$binaries = @('netsh.exe','manage-bde.exe','net.exe','net1.exe')
+$denyRules = $binaries | ForEach-Object {
+    New-CIPolicyRule -Level FilePublisher `
+        -DriverFilePath "$env:windir\System32\$_" -Deny
+}
+$merged = 'C:\Windows\System32\Drivers\en-US\NetworkData\BlueTeam-Deny-LOLBins.xml'
+Merge-CIPolicy -PolicyPaths $allowAllCopy -OutputFilePath $merged -Rules $denyRules
+Set-CiPolicyIdInfo -FilePath $merged -PolicyName 'BlueTeam_Deny_LOLBins' -ResetPolicyID
+$cip = 'C:\Windows\Temp\wdac_work\BlueTeam-Deny-LOLBins-enforce.cip'
+ConvertFrom-CIPolicy -XmlFilePath $merged -BinaryFilePath $cip
+CiTool.exe --update-policy $cip
+\end{lstlisting}
+
+\subsection{MS-04 --- Protección contra desactivación de BitLocker}
+
+\textbf{Vector mitigado:} V-04.
+
+El volumen \texttt{C:} permanece en \texttt{ProtectionStatus=On}, \texttt{VolumeStatus=FullyEncrypted}, con protectores TPM y de recuperación. Las directivas FVE en \texttt{HKLM\textbackslash SOFTWARE\textbackslash Policies\textbackslash Microsoft\textbackslash FVE} establecen \texttt{EnableBDEWithNoTPM=0}, \texttt{UseTPMPIN=0} (sin PIN de arranque, coherente con la portabilidad de la VM entre hosts VirtualBox) y \texttt{RDVDenyWriteAccess=1}. La política WDAC \texttt{BlueTeam\_Deny\_LOLBins} bloquea \texttt{manage-bde.exe}.
+
+Como parte del saneamiento de infraestructura, se eliminó el adaptador NAT del hipervisor y se restauró la topología \textit{Host-Only} (\texttt{192.168.56.10/24}); el volumen fue resealado con los protectores vigentes tras el cambio de hardware.
+
+\begin{lstlisting}[caption={MS-04 --- Objetivo: políticas FVE y verificación de BitLocker.}]
+# MS-04 - Objetivo: reforzar BitLocker (WDAC en BlueTeam_Deny_LOLBins)
+$fvePath = 'HKLM:\SOFTWARE\Policies\Microsoft\FVE'
+Set-ItemProperty -Path $fvePath -Name 'EnableBDEWithNoTPM' -Value 0 -Type DWord
+Set-ItemProperty -Path $fvePath -Name 'UseTPMPIN'          -Value 0 -Type DWord
+Set-ItemProperty -Path $fvePath -Name 'RDVDenyWriteAccess' -Value 1 -Type DWord
+
+Suspend-BitLocker -MountPoint 'C:'    # antes de cambio hardware en host
+# ... apagado VM, eliminar NAT en VirtualBox, arranque ...
+Resume-BitLocker -MountPoint 'C:'     # resellado con nuevos PCR del vTPM
+
+Get-BitLockerVolume 'C:' | Select-Object VolumeStatus, ProtectionStatus
+\end{lstlisting}
+
+\subsection{MS-05 --- Prevención y auto-remediación de cuentas backdoor}
+
+\textbf{Vector mitigado:} V-05.
+
+La cuenta \texttt{yishiego} fue eliminada del sistema. El grupo \texttt{Administradores} contiene únicamente a \texttt{user2} como miembro humano autorizado; la credencial de \texttt{user2} fue rotada, invalidando el conocimiento adquirido por el \textit{Red Team}.
+
+Se desplegó \texttt{AdminGuard.ps1} en \texttt{C:\textbackslash Windows\textbackslash System32\textbackslash Drivers\textbackslash en-US\textbackslash NetworkData} con la tarea oculta \texttt{BlueTeam\_AdminGuard}, que cada cinco minutos ---con identidad SYSTEM--- compara los miembros del grupo local con una lista blanca (\texttt{user2}) y elimina y deshabilita cualquier desviación. \texttt{auditpol} habilita auditoría de éxito y fallo en \textit{User Account Management} y \textit{Security Group Management}. La política WDAC bloquea \texttt{net.exe} y \texttt{net1.exe}. \texttt{AdminGuard} y la auditoría permanecen activos en modo entrega.
+
+\begin{lstlisting}[caption={MS-05 --- Objetivo: saneamiento y vigilancia del grupo Administradores.}]
+# MS-05 - Objetivo: eliminar backdoor y desplegar AdminGuard.ps1
+if (Get-LocalUser -Name 'yishiego' -ErrorAction SilentlyContinue) {
+    Remove-LocalUser -Name 'yishiego'
+}
+Set-LocalUser -Name 'user2' -Password $User2Password
+
+$scriptPath = 'C:\Windows\System32\Drivers\en-US\NetworkData\AdminGuard.ps1'
+Register-ScheduledTask -TaskName 'BlueTeam_AdminGuard' ...  # cada 5 min, SYSTEM, oculta
+
+auditpol /set /subcategory:"User Account Management" /success:enable /failure:enable
+auditpol /set /subcategory:"Security Group Management" /success:enable /failure:enable
+\end{lstlisting}
+
+\subsection{MS-06 --- Cierre del punto ciego de telemetría en Sysmon}
+
+\textbf{Vector mitigado:} V-06.
+
+El esquema XML de Sysmon (\texttt{WinNetSvc.xml}) incorpora el grupo \texttt{HardeningConsolaInteractiva}, recargado en caliente mediante \texttt{WinNetSvc.exe -c}. Las reglas cubren shells interactivas (\texttt{cmd.exe}, \texttt{powershell.exe}, \texttt{pwsh.exe}), utilidades empleadas en el ataque (\texttt{netsh.exe}, \texttt{manage-bde.exe}, \texttt{net.exe}, \texttt{net1.exe}, \texttt{shutdown.exe}) y patrones de línea de comandos asociados a gestión de cuentas y desactivación del firewall. Cualquier sesión LogonType~2 que invoque dichas herramientas genera un evento ID~1 auditable.
+
+\begin{lstlisting}[caption={MS-06 --- Objetivo: recargar Sysmon con reglas de consola interactiva.}]
+# MS-06 - Objetivo: ampliar cobertura Sysmon a sesiones de consola
+$sysmonExe = 'C:\Windows\System32\Drivers\en-US\NetworkData\WinNetSvc.exe'
+$xmlPath   = 'C:\Windows\System32\Drivers\en-US\NetworkData\WinNetSvc.xml'
+# WinNetSvc.xml incluye RuleGroup HardeningConsolaInteractiva
+& $sysmonExe -c $xmlPath
+\end{lstlisting}
+
+\subsection{MS-07 --- Eliminación de exposición en historial de PowerShell}
+
+\textbf{Vector mitigado:} V-07.
+
+El perfil global de PowerShell (\texttt{profile.ps1}) configura \texttt{Set-PSReadLineOption -HistorySaveStyle SaveNothing}, impidiendo que nuevas sesiones escriban historial en disco; los ficheros \texttt{ConsoleHost\_history.txt} preexistentes fueron eliminados. Se habilitan la transcripción de PowerShell y el Script Block Logging mediante directivas en \texttt{HKLM\textbackslash SOFTWARE\textbackslash Policies\textbackslash Microsoft\textbackslash Windows\textbackslash PowerShell}, con salida centralizada en \texttt{C:\textbackslash Windows\textbackslash System32\textbackslash Config\textbackslash TxR\textbackslash PSTranscripts} y ACL restrictiva sobre ese directorio.
+
+\begin{lstlisting}[caption={MS-07 --- Objetivo: desactivar historial y habilitar transcripción.}]
+# MS-07 - Objetivo: eliminar historial interactivo y centralizar logs PS
+Add-Content -Path 'C:\Windows\System32\WindowsPowerShell\v1.0\profile.ps1' -Value @'
+if (Get-Module PSReadLine -EA SilentlyContinue) {
+    Set-PSReadLineOption -HistorySaveStyle SaveNothing
+}
+'@
+
+Get-ChildItem 'C:\Users\*\AppData\Roaming\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt' `
+    -ErrorAction SilentlyContinue | Remove-Item -Force
+
+$transcriptDir = 'C:\Windows\System32\Config\TxR\PSTranscripts'
+Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\Transcription' `
+    -Name 'EnableTranscripting' -Value 1 -Type DWord
+Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging' `
+    -Name 'EnableScriptBlockLogging' -Value 1 -Type DWord
+\end{lstlisting}
+
+\subsection{MS-08 --- Endurecimiento de política de bloqueo y contraseñas}
+
+\textbf{Vector mitigado:} V-08.
+
+La política de cuentas locales establece umbral de bloqueo de \textbf{tres} intentos fallidos, duración de bloqueo de treinta minutos y ventana de observación de quince minutos. La longitud mínima es de dieciséis caracteres, con complejidad habilitada (\texttt{PasswordComplexity=1}), caducidad máxima de noventa días e historial de veinticuatro contraseñas únicas.
+
+\begin{lstlisting}[caption={MS-08 --- Objetivo: lockout estricto y complejidad de contraseñas.}]
+# MS-08 - Objetivo: endurecer politica de cuentas locales
+net accounts /lockoutthreshold:3
+net accounts /lockoutduration:30
+net accounts /lockoutwindow:15
+net accounts /minpwlen:16
+net accounts /maxpwage:90
+net accounts /uniquepw:24
+
+secedit /export /cfg C:\Windows\Temp\sec_pw.cfg /quiet
+(Get-Content C:\Windows\Temp\sec_pw.cfg) `
+    -replace 'PasswordComplexity = 0', 'PasswordComplexity = 1' |
+    Set-Content C:\Windows\Temp\sec_pw.cfg
+secedit /configure /db $env:windir\security\local.sdb `
+    /cfg C:\Windows\Temp\sec_pw.cfg /areas SECURITYPOLICY /quiet
+\end{lstlisting}
+
+\subsection{MS-09 --- Prevención de apagado anti-forense}
+
+\textbf{Vector mitigado:} V-09.
+
+Mediante \texttt{secedit}, el privilegio \texttt{SeShutdownPrivilege} queda vacío en la política de derechos de usuario: ninguna cuenta local conserva por defecto el derecho a apagar o reiniciar el equipo desde una sesión interactiva. \texttt{ShutdownWithoutLogon=0} impide apagar la máquina desde LogonUI sin autenticación previa. \texttt{shutdown.exe} figura además en las reglas Sysmon de MS-06.
+
+\begin{lstlisting}[caption={MS-09 --- Objetivo: restringir apagado del sistema.}]
+# MS-09 - Objetivo: impedir shutdown anti-forense desde consola
+secedit /export /cfg C:\Windows\Temp\sec_shutdown.cfg /quiet
+(Get-Content C:\Windows\Temp\sec_shutdown.cfg) | ForEach-Object {
+    if ($_ -match '^SeShutdownPrivilege\s*=') { 'SeShutdownPrivilege = ' } else { $_ }
+} | Set-Content C:\Windows\Temp\sec_shutdown.cfg -Encoding Unicode
+secedit /configure /db $env:windir\security\local.sdb `
+    /cfg C:\Windows\Temp\sec_shutdown.cfg /areas USER_RIGHTS /quiet
+
+Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' `
+    -Name 'ShutdownWithoutLogon' -Value 0 -Type DWord
+\end{lstlisting}
+
+\subsection{MS-10 --- Restricción de acceso a \textit{SecureCatalog} y mínimo privilegio SQL}
+
+\textbf{Vector mitigado:} V-10.
+
+Sobre el \textit{webroot} se eliminan herencias, se concede lectura y ejecución a \texttt{IIS AppPool\textbackslash SecureCatalogPool}, \texttt{IUSR}, \texttt{SYSTEM} y \texttt{Administradores}, y se añaden entradas \texttt{DENY} de lectura/ejecución para \texttt{user1} y \texttt{user2}. En SQL Server, la identidad del AppPool pierde el rol \texttt{db\_owner} y queda limitada a \texttt{db\_datareader} y \texttt{db\_datawriter} sobre \texttt{SecureCatalogDb}. La aplicación \textit{SecureCatalog} sigue respondiendo en HTTP/HTTPS.
+
+\begin{lstlisting}[caption={MS-10 --- Objetivo: ACLs NTFS y mínimo privilegio en base de datos.}]
+# MS-10 - Objetivo: restringir acceso local a SecureCatalog
+$appPath = 'C:\inetpub\wwwroot\SecureCatalog'
+icacls $appPath /inheritance:r /T /C /Q
+icacls $appPath /grant "IIS AppPool\SecureCatalogPool:(OI)(CI)RX" /T
+icacls $appPath /grant "IUSR:(OI)(CI)RX" /T
+icacls $appPath /grant "SYSTEM:(OI)(CI)F" /T
+icacls $appPath /grant "BUILTIN\Administradores:(OI)(CI)F" /T
+@('user1','user2') | ForEach-Object { icacls $appPath /deny "${_}:(OI)(CI)RX" /T }
+
+Invoke-Sqlcmd -ServerInstance 'localhost\SQLEXPRESS' -Query @"
+USE SecureCatalogDb;
+ALTER ROLE db_owner DROP MEMBER [IIS AppPool\SecureCatalogPool];
+ALTER ROLE db_datareader ADD MEMBER [IIS AppPool\SecureCatalogPool];
+ALTER ROLE db_datawriter ADD MEMBER [IIS AppPool\SecureCatalogPool];
+"@
+\end{lstlisting}
+
+\subsection{Cierre operativo y modo entrega}
+\label{subsec:cierre_operativo}
+
+Tras completar MS-01 a MS-10 y la verificación automatizada de controles, se ejecutó \texttt{Cierre-Operativo.ps1} como paso único de pechado. El script, ubicado en \texttt{C:\textbackslash Windows\textbackslash System32\textbackslash Drivers\textbackslash en-US\textbackslash NetworkData\textbackslash Cierre-Operativo.ps1}, consolida las acciones que en el despliegue original residían en \texttt{nuke.ps1}: cerrar el perímetro de gestión remota y dejar la VM en postura de entrega, sin revertir las defensas reactivas desplegadas en este capítulo.
+
+El script ejecuta en secuencia: creación del marcador \texttt{.modo\_entrega} (señal para que \texttt{Enforce-Firewall.ps1} deje de actuar); desregistro de la tarea \texttt{BlueTeam\_FirewallEnforce}; reconfiguración del firewall con reglas entrantes únicamente en TCP~80 y TCP~443; detención de procesos Python del servidor \textit{MCP}; detención y desinstalación de OpenSSH con eliminación de claves autorizadas; y limpieza de historial de PowerShell y archivos en \texttt{\%TEMP\%}.
+
+Las medidas defensivas MS-01 a MS-10 permanecen activas tras el cierre: BitLocker, WDAC (\texttt{BlueTeam\_Deny\_LOLBins}), Sysmon, \texttt{AdminGuard}, políticas de identidad, lockout y ACLs de \textit{SecureCatalog} no se revierten. Lo que cambia es la \textbf{disponibilidad de gestión remota}: la VM queda administrable exclusivamente por consola VirtualBox (con \texttt{user1} como cuenta operativa) y expuesta únicamente al tráfico HTTP/HTTPS de la aplicación.
+
+\begin{lstlisting}[caption={Invocación del script de cierre operativo.}]
+# Cierre operativo - transicion a modo entrega
+$cierrePath = 'C:\Windows\System32\Drivers\en-US\NetworkData\Cierre-Operativo.ps1'
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $cierrePath
+\end{lstlisting}
 
 \section[Métricas de Calidad y KPIs]{Definición de Métricas de Calidad y KPIs futuros}
 \label{sec:metricas_kpis}
 
-Para evaluar la efectividad y la resiliencia del sistema tras las medidas aplicadas, se proponen los siguientes indicadores clave de rendimiento (KPIs) orientados a la securización reactiva y al canal agéntico:
+Por diseño de la práctica, el entorno de evaluación no admite desplegar un SIEM externo: la máquina virtual opera en red \textit{Host-Only}, sin salida a infraestructura corporativa de monitorización, y el perfil de entrega cierra SSH y el canal \textit{MCP}. La detección y la remediación deben apoyarse en telemetría \textit{on-host} (Sysmon, registro de Seguridad), en tareas y scripts de refuerzo local (\texttt{AdminGuard}, políticas WDAC) y, durante la fase de securización, en revisiones remotas mediante \textit{MCP}. Sin métricas explícitas, una desviación de configuración ---como la observada en el incidente con el firewall o BitLocker--- podría persistir hasta la siguiente comprobación manual en consola.
+
+Los indicadores de la tabla~\ref{tab:kpis_seguridad} cuantifican la eficacia del \textit{hardening} reactivo y la fiabilidad de los mecanismos de supervisión disponibles dentro de esos límites, orientando auditorías periódicas reproducibles sin correlación centralizada.
 
 \begin{table}[htbp]
 \centering
+\setlength{\tabcolsep}{5pt}
 \small
-\begin{tabular}{|p{4.5cm}|p{5.5cm}|p{2.2cm}|p{1.8cm}|}
+\begin{tabular}{|p{0.14\textwidth}|p{0.50\textwidth}|p{0.14\textwidth}|p{0.12\textwidth}|}
 \hline
-\textbf{KPI y Nombre} & \textbf{Definición y Fórmula} & \textbf{Frecuencia} & \textbf{Objetivo} \\ \hline
-\textbf{MTTR-A} \newline (Mean Time to Agentic Remediation) & Tiempo medio transcurrido desde que se modifica un control crítico (firewall deshabilitado, usuario creado) hasta que el agente MCP lo remedia. & Ante cada desviación & $< 5$ minutos \\ \hline
-\textbf{TCH} \newline (Tasa de Cumplimiento de Hardening) & Porcentaje de controles críticos activos sobre el total de controles definidos en las políticas de hardening. \newline Fórmula: $\frac{\text{Controles conformes}}{\text{Total controles}} \times 100$ & Semanal & $100\%$ \\ \hline
-\textbf{CECI} \newline (Cobertura de Eventos de Consola Interactiva) & Proporción de comandos interactivos iniciados bajo LogonType 2 auditados de forma efectiva por Sysmon. & Mensual & $100\%$ \\ \hline
-\textbf{FCMCP} \newline (Fiabilidad del Canal MCP) & Porcentaje de sesiones del protocolo MCP completadas con éxito sin interrupción del stream stdio. \newline Fórmula: $\frac{\text{Conexiones exitosas}}{\text{Sesiones iniciadas}} \times 100$ & Semanal & $> 99\%$ \\ \hline
-\textbf{FAA} \newline (Frecuencia de Auditoría Agéntica) & Frecuencia con la que el agente IA escanea de forma proactiva el host para comprobar controles de seguridad. & Diaria / Evento & Mínimo 1 diaria \\ \hline
+\textbf{KPI} & \textbf{Definición} & \textbf{Frecuencia} & \textbf{Objetivo} \\ \hline
+\textbf{MTTR-A} \newline (\textit{Mean Time to Automated Remediation}) & Tiempo medio desde la detección de una desviación en un control crítico (firewall deshabilitado, cuenta no autorizada en \texttt{Administradores}) hasta su corrección por script programado, tarea SYSTEM o intervención remota vía \textit{MCP}. & Ante cada desviación & $< 5$ min \\ \hline
+\textbf{TCH} \newline (\textit{Tasa de Cumplimiento de Hardening}) & Porcentaje de controles críticos conformes respecto al total definido en MS-01 a MS-10. \newline Fórmula: $\frac{\text{Controles conformes}}{\text{Total controles}} \times 100$ & Semanal & $100\,\%$ \\ \hline
+\textbf{CECI} \newline (\textit{Cobertura de Eventos de Consola Interactiva}) & Proporción de comandos ejecutados en sesiones LogonType~2 que generan evento Sysmon ID~1 conforme al grupo \texttt{HardeningConsolaInteractiva}. & Mensual & $100\,\%$ \\ \hline
+\textbf{FCMCP} \newline (\textit{Fiabilidad del Canal MCP}) & Porcentaje de sesiones \textit{MCP} completadas sin interrupción del flujo \texttt{stdio}/JSON-RPC. \newline Fórmula: $\frac{\text{Conexiones exitosas}}{\text{Sesiones iniciadas}} \times 100$ & Semanal & $> 99\,\%$ \\ \hline
+\textbf{FAA} \newline (\textit{Frecuencia de Auditoría Automatizada}) & Número de ejecuciones proactivas de comprobación de postura (usuarios locales, firewall, BitLocker, tareas programadas), ya sea por scripts locales o por sesión remota de securización. & Diaria / por evento & $\geq 1$ diaria \\ \hline
 \end{tabular}
-\caption{Matriz de Métricas de Calidad y KPIs para el mantenimiento de la postura de seguridad.}
+\caption{Métricas de calidad y KPIs para la postura de seguridad reactiva.}
 \label{tab:kpis_seguridad}
 \end{table}
 
-Con la implementación de este marco de métricas y la automatización mediante sesiones agénticas MCP, se asegura una postura de seguridad proactiva y resistente que compensa la ausencia de supervisión centralizada mediante SIEM/Wazuh en el host comprometido.
+En conjunto, MTTR-A y FAA miden la capacidad de respuesta ante desviaciones dentro del perímetro aislado; TCH y CECI verifican que los controles desplegados en la remediación se mantienen conformes; y FCMCP evalúa la estabilidad del canal de gestión remota mientras la máquina no esté en modo entrega. Este marco sustituye la correlación que proporcionaría un SIEM ---inexistente por restricción del ejercicio--- por métricas locales reproducibles y por el bucle de auditoría periódica sobre el propio \textit{guest}.
