@@ -1,1027 +1,1072 @@
-# Plan de Securización Post-Incidente
+# Plan de Securización Post-Incidente — SecureCatalog VM
 
-**Caso:** Remediación y hardening reactivo del servidor WIN-VNQSUL89MUA  
-**Máquina afectada:** Windows Server 2025 — `192.168.56.10`  
-**Autor:** Blue Team — Agente de Remediación Post-Incidente  
-**Fecha:** 23 de junio de 2026  
+**Caso:** Compromiso y remediación del servidor WIN-VNQSUL89MUA  
+**Sistema afectado:** Windows Server 2025 — `192.168.56.10`  
+**Aplicación desplegada:** SecureCatalog (IIS + ASP.NET Core 8 + SQL Server Express)  
+**Incidente confirmado:** 25 de marzo de 2026  
+**Periodo de exposición:** 03/03/2026 – 07/04/2026  
+**Autor:** Blue Team — Especialista en Respuesta a Incidentes  
+**Fecha del plan:** 25 de junio de 2026  
 **Clasificación:** CONFIDENCIAL  
 
-**Referencias analizadas:**
-
-- [3_informe_forense.md](3_informe_forense.md) — RCA del compromiso del 25/03/2026  
-- [2_red_team_audit_report.md](2_red_team_audit_report.md) — Exfiltración JWT vía memoria hypervisor y bypass rate limiting  
-- [1_blue_team_instrucciones.txt](1_blue_team_instrucciones.txt) — Hardening previo (`nuke.ps1`, `WinNetSvc`, LOLBins)  
-- [3_Restauracion_SSH_MCP_Report.md](3_Restauracion_SSH_MCP_Report.md) — Canal de gestión MCP/SSH restaurado  
-
-> **Nota:** Este documento sustituye al borrador [4_plan_remediacion.md](4_plan_remediacion.md) como plan oficial de securización post-incidente.
+> **Documento fusionado** a partir de los planes individuales `5(composer)_plan_securizacion_post_incidente.md` y `5(sonnet)_plan_securizacion_post_incidente.md`, consolidando todas las medidas aplicables sin duplicar controles redundantes.
 
 ---
 
-## 1. Resumen Ejecutivo
+## 0. Resumen Ejecutivo
 
-El servidor **WIN-VNQSUL89MUA** fue comprometido a través de dos vectores independientes:
+El servidor **WIN-VNQSUL89MUA** fue comprometido el **25/03/2026** mediante acceso interactivo local (LogonType 2) a la consola de VirtualBox con credenciales del administrador `user2`. En una sesión de ~16 minutos, el Red Team desactivó el firewall, desactivó BitLocker, creó la cuenta backdoor `yishiego` con privilegios de Administrador, reconoció la aplicación SecureCatalog y apagó el sistema para borrar evidencia volátil.
 
-1. **Vector físico (25/03/2026):** Acceso interactivo a la consola VirtualBox con credenciales comprometidas del usuario `user2` (LogonType 2). El Red Team desactivó el Firewall de Windows y BitLocker, creó la cuenta backdoor `yishiego` con privilegios de Administrador y forzó un apagado inmediato para destruir evidencia volátil. La configuración Sysmon (`WinNetSvc.xml`) no capturó ningún evento ProcessCreate (ID 1) durante la sesión, exponiendo un punto ciego crítico en la telemetría de consola interactiva.
+El hardening inicial (firewall restrictivo, eliminación de SSH/RDP/WinRM, honeytoken, neutralización parcial de LOLBins, Sysmon ofuscado) **contuvo el vector remoto**, pero dejó brechas en: separación de privilegios en consola (`user1` pendiente), telemetría Sysmon limitada a IIS, ausencia de `net.exe`/`netsh.exe`/`manage-bde.exe` en LOLBins, exposición de credenciales en historial de PowerShell, y controles anti-manipulación insuficientes sobre firewall y BitLocker.
 
-2. **Vector hypervisor (Red Team Audit):** Extracción del volcado de memoria de la VM mediante `VBoxManage debugvm dumpvmcore` desde el host, análisis con Volatility, recuperación del `SecretKey` JWT en claro y falsificación de token administrativo. Adicionalmente, se detectó bypass del rate limiter de la aplicación mediante cabeceras `X-Forwarded-For` falsificadas.
+Este plan define **diez medidas de securización** (MS-01 a MS-10) más una **fase de cierre operativo diferida** (§3), cada una vinculada a vectores confirmados en el informe forense. Los métodos de aplicación son idempotentes mediante PowerShell, GPO y Registro nativos de Windows Server 2025.
 
-El hardening perimetral previo (`nuke.ps1`: solo HTTP/HTTPS, SSH eliminado, firewall restrictivo, LOLBins neutralizados) **no mitigó el acceso físico a la consola** ni el vector hypervisor.
+> **Política de canal de gestión (SSH / MCP):** Durante la ejecución del plan —incluidos reintentos de etapas fallidas por un LLM o analista— **no se deben eliminar SSH ni MCP ni cerrar sus puertos en el firewall**. El Blue Team opera la VM mediante **OpenSSH (TCP 22)** y el servidor **MCP** (transporte principal por stdio/SSH; puerto **TCP 8000** reservado para SSE si está desplegado). El corte de esas vías queda relegado al script **`Cierre-Operativo.ps1`** (§3), que el operador ejecuta **manualmente y solo cuando da por finalizado el trabajo** en la VM.
 
-Este plan define **15 medidas de hardening avanzado** (MED-01 a MED-15), organizadas en 7 bloques por vector de ataque, con métodos de aplicación nativos de Windows Server 2025. La ausencia de SIEM centralizado (Wazuh) se compensa con un **bucle de autorremediación agéntica vía MCP** (MED-15).
-
----
-
-## 2. Análisis de Causa Raíz (RCA)
-
-| ID | Debilidad explotada | Evidencia | Técnica MITRE |
-|----|---------------------|-----------|---------------|
-| INC-01 | Acceso consola VM con credenciales válidas de `user2` | Event ID 4624, LogonType 2, origen `127.0.0.1`, 25/03/2026 | T1078 — Valid Accounts |
-| INC-02 | Creación cuenta backdoor `yishiego` + elevación a Administradores | Event 4720 (creación) + 4732 (grupo), 25/03/2026 13:43 | T1136 — Create Account |
-| INC-03 | Firewall desactivado con `netsh advfirewall set allprofiles state off` | Historial `ConsoleHost_history.txt`; firewall inactivo hasta recuperación (13 días) | T1562.004 — Disable Firewall |
-| INC-04 | BitLocker desactivado con `manage-bde -off C:` | Historial PowerShell | T1486 — Data Encrypted for Impact |
-| INC-05 | Punto ciego Sysmon: 0 eventos ProcessCreate (ID 1) en sesión de consola | 2.607 eventos Sysmon el 25/03, ninguno de tipo ID 1 | T1562.001 — Impair Defenses |
-| INC-06 | Apagado forzado `shutdown /s /t 0` para destruir evidencia volátil | Event 1100 (log service stopped), 4647 (logout) | T1529 — System Shutdown/Reboot |
-| INC-07 | Reversión de LOLBins renombrados a `.bak` para instalar Python fileless | `curl.exe.bak` → `curl.exe`; `tar.exe.bak` → `tar.exe` | T1218 — System Binary Proxy Execution |
-| INC-08 | Historial PowerShell en texto claro con contraseña `EstuveAqui.1234` expuesta | `C:\Users\Administrador\...\ConsoleHost_history.txt` (6.496 bytes) | T1059 — Command and Scripting Interpreter |
-| INC-09 | Extracción `SecretKey` JWT desde RAM del VM via `VBoxManage debugvm dumpvmcore` + Volatility | Red Team Audit Report — `strings memdump.elf \| grep -i jwt` | T1003.001 — LSASS Memory (análogo) |
-| INC-10 | Bypass de rate limiting mediante cabecera `X-Forwarded-For` falsificada | 7 peticiones con IPs distintas sin activar `RATE_LIMIT_EXCEEDED` | T1110.003 — Password Spraying |
-
----
-
-## 3. Fase 0 — Saneamiento Inmediato (Prerrequisito)
-
-> **IMPORTANTE:** Ejecutar esta fase **antes** de aplicar las medidas MED-01 a MED-15. Preservar el canal de gestión MCP/SSH (puertos 22 y 8000) restringido a la IP del host analista (`192.168.56.1`).
-
-### 3.1 Eliminación de persistencia
-
-```powershell
-# Verificar existencia de la cuenta backdoor
-Get-LocalUser -Name "yishiego" -ErrorAction SilentlyContinue
-
-# Eliminar cuenta de persistencia
-net user yishiego /delete
-
-# Confirmar que no queda en el grupo Administradores
-Get-LocalGroupMember -Group "Administradores"
+```mermaid
+flowchart TD
+    subgraph fase1 [Fase1_Saneamiento]
+        A1[Eliminar_yishiego]
+        A2[Rotar_user2]
+        A3[Restaurar_firewall]
+        A4[Reactivar_BitLocker]
+        A5[Restaurar_VBox_NAT_y_CPUs]
+    end
+    subgraph fase2 [Fase2_Identidad_y_Perimetro]
+        B1[MS01_Separacion_privilegios]
+        B2[MS02_Logon_screen]
+        B3[MS03_Firewall_GPO_WDAC]
+        B4[MS04_BitLocker_TPM_WDAC]
+        B5[MS05_Backdoor_watchdog]
+    end
+    subgraph fase3 [Fase3_Telemetria_y_Controles]
+        C1[MS06_Sysmon_consola]
+        C2[MS07_PS_historial]
+        C3[MS08_Lockout_passwords]
+        C4[MS09_Shutdown]
+        C5[MS10_ACLs_SQL]
+    end
+    subgraph fase4 [Fase4_Cierre_manual]
+        D1[Cierre_Operativo_ps1]
+    end
+    fase1 --> fase2 --> fase3
+    fase3 -.->|solo cuando el operador lo indique| fase4
 ```
 
-### 3.2 Rotación de credenciales comprometidas
+### Vectores confirmados (alcance estricto)
+
+| ID | Vector / Debilidad | Evidencia |
+|----|-------------------|-----------|
+| V-01 | Acceso consola VirtualBox con credenciales `user2` (LogonType 2) | Informe forense §3.7 |
+| V-02 | Exposición de usuario en pantalla de logon (`dontdisplaylastusername` pendiente) | Hardening inicial §432-437 |
+| V-03 | Desactivación firewall: `netsh advfirewall set allprofiles state off` | Historial PowerShell §3.3 |
+| V-04 | Desactivación BitLocker: `manage-bde -off C:` | Historial PowerShell §3.3 |
+| V-05 | Cuenta backdoor: `net user yishiego` + elevación a Administradores | Eventos 4720/4732 |
+| V-06 | Punto ciego Sysmon: 0 eventos Process Create en consola | Informe forense §3.5 |
+| V-07 | Contraseña expuesta en `ConsoleHost_history.txt` | Informe forense §3.3 |
+| V-08 | Política de bloqueo débil (10 intentos) y credenciales comprometidas | Hardening §439-443 |
+| V-09 | Apagado anti-forense: `shutdown /s /t 0` | Historial PowerShell §3.3 |
+| V-10 | Reconocimiento de `C:\inetpub\wwwroot\SecureCatalog` | Historial PowerShell §3.3 |
+
+> **Nota sobre acceso físico:** El informe forense confirma que el Red Team entró por consola VirtualBox (LogonType 2), vector **previsto y autorizado** en el ejercicio. No se endurece el hipervisor para bloquear ese acceso; las medidas MS-01 a MS-10 limitan el impacto una vez obtenida la sesión en el guest.
+
+---
+
+## 1. Saneamiento Inmediato (Pre-Endurecimiento)
+
+> **Prerequisito:** Ejecutar desde consola de la VM o **vía SSH/MCP** con sesión elevada. Todos los scripts son idempotentes. Esta fase debe completarse **antes** de aplicar MS-01 en adelante. **No ejecutar `Cierre-Operativo.ps1` durante el saneamiento.**  
+> **Credenciales (agente LLM):** El agente **genera** las contraseñas de `user2` y `user1` automáticamente (`New-SecureCatalogPassword` en `5_2` §3); no usa `Read-Host` ni pide valores al operador. Los literales se documentan en `5_4_resultado_securizacion.md`.
+
+### 1.1 Eliminación de la cuenta backdoor y saneamiento del grupo Administradores
 
 ```powershell
-# Generar contraseña robusta (20 caracteres, complejidad alta)
-$nuevaPass = -join ((33..126) | Get-Random -Count 20 | ForEach-Object { [char]$_ })
-net user user2 $nuevaPass
-Write-Host "[!] Guardar contraseña en gestor seguro fuera de la VM: $nuevaPass" -ForegroundColor Yellow
+if (Get-LocalUser -Name 'yishiego' -ErrorAction SilentlyContinue) {
+    Remove-LocalUser -Name 'yishiego'
+    Write-Host '[+] Cuenta yishiego eliminada.' -ForegroundColor Green
+} else {
+    Write-Host '[=] Cuenta yishiego no existe (ya saneada).' -ForegroundColor Gray
+}
+
+$whitelist = @('user2')
+Get-LocalGroupMember -Group 'Administradores' |
+    Where-Object { $_.ObjectClass -eq 'User' -and $_.Name -notmatch 'Administrator$' } |
+    ForEach-Object {
+        $shortName = ($_.Name -split '\\')[-1]
+        if ($whitelist -notcontains $shortName) {
+            Remove-LocalGroupMember -Group 'Administradores' -Member $_.Name -ErrorAction SilentlyContinue
+            Disable-LocalUser -Name $shortName -ErrorAction SilentlyContinue
+            Write-Host "[-] Eliminado de Administradores: $shortName" -ForegroundColor Yellow
+        }
+    }
+
+$newPasswordPlain = $plainUser2   # Generado en 5_2 §3 antes de F00
+$newPassword = $User2Password     # SecureString ya creado
+Set-LocalUser -Name 'user2' -Password $newPassword -PasswordNeverExpires $false
+Write-Host '[+] Contraseña de user2 rotada.' -ForegroundColor Green
+# Agente LLM: $plainUser2 ya está en bitácora para 5_4 (no imprimir en consola)
 ```
 
-### 3.3 Restauración del Firewall de Windows
+> **Ejecución por agente LLM:** Usar `$plainUser2` / `$User2Password` generados en `5_2` §3. Documentar `$plainUser2` en `5_4_resultado_securizacion.md` (sección CREDENCIALES).
+
+### 1.2 Restauración del Firewall de Windows (modo operativo Blue Team)
+
+Durante la ejecución del plan el firewall permanece **activo y restrictivo**, pero debe conservar los puertos de gestión del Blue Team además de HTTP/HTTPS de SecureCatalog.
 
 ```powershell
-# 1. Habilitar todos los perfiles
-Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled True
-
-# 2. Política restrictiva por defecto
-Set-NetFirewallProfile -Profile Domain,Public,Private `
+Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled True `
     -DefaultInboundAction Block -DefaultOutboundAction Block
 
-# 3. Reglas explícitas — servicio web + canal de gestión agéntica
-New-NetFirewallRule -DisplayName "Allow_HTTP_In"  -Direction Inbound -Protocol TCP -LocalPort 80   -Action Allow -ErrorAction SilentlyContinue
-New-NetFirewallRule -DisplayName "Allow_HTTPS_In" -Direction Inbound -Protocol TCP -LocalPort 443  -Action Allow -ErrorAction SilentlyContinue
-New-NetFirewallRule -DisplayName "Allow_SSH_MCP"  -Direction Inbound -Protocol TCP -LocalPort 22   -Action Allow -RemoteAddress 192.168.56.1 -ErrorAction SilentlyContinue
-New-NetFirewallRule -DisplayName "Allow_MCP_SSE"  -Direction Inbound -Protocol TCP -LocalPort 8000 -Action Allow -RemoteAddress 192.168.56.1 -ErrorAction SilentlyContinue
-
-# 4. Verificación
-Get-NetFirewallProfile | Select-Object Name, Enabled, DefaultInboundAction, DefaultOutboundAction
-```
-
-### 3.4 Reactivación de BitLocker
-
-```powershell
-# Verificar estado actual
-manage-bde -status C:
-
-# Activar cifrado con protector TPM + clave de recuperación (guardar offline)
-Enable-BitLocker -MountPoint "C:" -EncryptionMethod Aes256 -TpmProtector -UsedSpaceOnly -ErrorAction SilentlyContinue
-$recovery = Add-BitLockerKeyProtector -MountPoint "C:" -RecoveryPasswordProtector
-Write-Host "[!] Clave de recuperación (guardar fuera de la VM):" -ForegroundColor Yellow
-$recovery.KeyProtector.RecoveryPassword
-
-# Verificar progreso
-Get-BitLockerVolume -MountPoint "C:" | Select-Object MountPoint, VolumeStatus, EncryptionPercentage, ProtectionStatus
-```
-
-### 3.5 Saneamiento de claves SSH autorizadas
-
-```powershell
-# Aplicar permisos estrictos OpenSSH (solo Administradores + SYSTEM)
-icacls "C:\ProgramData\ssh\administrators_authorized_keys" /inheritance:r /grant "*S-1-5-32-544:F" "SYSTEM:F"
-icacls "C:\ProgramData\ssh\administrators_authorized_keys" /setowner "*S-1-5-32-544"
-
-# Calcular hash SHA-256 de referencia (documentar para MED-15)
-Get-FileHash "C:\ProgramData\ssh\administrators_authorized_keys" -Algorithm SHA256
-```
-
----
-
-## 4. Matriz de Medidas de Hardening
-
-### Bloque A — Acceso local y credenciales
-
----
-
-#### MED-01
-
-| Campo | Detalle |
-|-------|---------|
-| **ID Incidente** | INC-01 |
-| **Vector de ataque** | Acceso consola VirtualBox con credenciales válidas de `user2` (LogonType 2) — T1078 |
-| **Nueva medida de seguridad** | Política de bloqueo de cuenta agresiva (5 intentos / 30 min), contraseña mínimo 16 caracteres, ocultar el último usuario en la pantalla de logon y exigir Ctrl+Alt+Supr para iniciar sesión |
-| **Justificación técnica** | El Red Team accedió directamente a la consola VM, evadiendo el firewall perimetral y SSH eliminado. Reducir el umbral de bloqueo a 5 intentos y no exponer nombres de cuenta dificultan la reutilización de credenciales filtradas o ataques de fuerza bruta en acceso físico |
-| **Método de aplicación** | `net accounts` + Registro de Windows |
-
-```powershell
-# Política de contraseñas y bloqueo
-net accounts /lockoutthreshold:5 /lockoutduration:30 /lockoutwindow:15
-net accounts /minpwlen:16 /maxpwage:90 /minpwage:1
-
-# No revelar el último usuario en la pantalla de logon
-reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v dontdisplaylastusername /t REG_DWORD /d 1 /f
-
-# Exigir Ctrl+Alt+Supr antes de iniciar sesión (desactiva bypass de pantalla de bloqueo)
-reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v DisableCAD /t REG_DWORD /d 0 /f
-
-# Mensaje legal disuasorio en pantalla de logon
-reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v legalnoticecaption /t REG_SZ /d "ACCESO RESTRINGIDO" /f
-reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v legalnoticetext /t REG_SZ /d "Sistema de uso exclusivo para personal autorizado. Toda actividad es monitorizada y registrada." /f
-```
-
----
-
-#### MED-02
-
-| Campo | Detalle |
-|-------|---------|
-| **ID Incidente** | INC-02 |
-| **Vector de ataque** | Creación de cuenta backdoor `yishiego` y elevación directa al grupo Administradores — T1136 |
-| **Nueva medida de seguridad** | Auditoría avanzada de gestión de cuentas y grupos de seguridad; script de whitelist de administradores locales con alerta en Event Log |
-| **Justificación técnica** | `net user` y `net localgroup` generan eventos Security 4720, 4722 y 4732 independientemente de Sysmon. Habilitarlos explícitamente con `auditpol` garantiza telemetría incluso si Sysmon falla, y el script de whitelist permite detección automática de cuentas no autorizadas |
-| **Método de aplicación** | `auditpol` (Advanced Audit Policy) + PowerShell |
-
-```powershell
-# Habilitar subcategorías de auditoría críticas
-auditpol /set /subcategory:"User Account Management"   /success:enable /failure:enable
-auditpol /set /subcategory:"Security Group Management" /success:enable /failure:enable
-auditpol /set /subcategory:"Logon"                     /success:enable /failure:enable
-auditpol /set /subcategory:"Special Logon"             /success:enable /failure:enable
-
-# Verificar configuración
-auditpol /get /subcategory:"User Account Management"
-
-# Script de whitelist — ejecutar como tarea programada (ver Sección 6)
-$allowedAdmins = @("WIN-VNQSUL89MUA\user2")
-$currentAdmins = Get-LocalGroupMember -Group "Administradores" |
-    Where-Object { $_.ObjectClass -eq "User" } |
-    Select-Object -ExpandProperty Name
-
-$rogue = $currentAdmins | Where-Object { $_ -notin $allowedAdmins }
-if ($rogue) {
-    $msg = "ALERTA: Cuenta(s) no autorizada(s) en Administradores: $($rogue -join ', ')"
-    Write-EventLog -LogName Application -Source "SecurityAudit" -EventId 5010 -EntryType Error -Message $msg
-    Write-Warning $msg
-}
-```
-
----
-
-#### MED-03
-
-| Campo | Detalle |
-|-------|---------|
-| **ID Incidente** | INC-01 |
-| **Vector de ataque** | Credenciales de `user2` conocidas por el Red Team; extracción de secretos LSA desde memoria — T1078 / T1003 |
-| **Nueva medida de seguridad** | LSA Protection (RunAsPPL) + Virtualization-Based Security (VBS) con Credential Guard |
-| **Justificación técnica** | `RunAsPPL` convierte al proceso `lsass.exe` en Protected Process Light, impidiendo que procesos sin firma Microsoft lean su memoria. Credential Guard aisla las credenciales en una instancia de Hyper-V separada (VSM), inaccesible incluso con privilegios SYSTEM. Ambos controles elevan el coste de extracción de credenciales en el vector hypervisor (INC-09) |
-| **Método de aplicación** | Registro de Windows (requiere reinicio) |
-
-```powershell
-# LSA Protected Process Light
-reg add "HKLM\SYSTEM\CurrentControlSet\Control\Lsa" /v RunAsPPL /t REG_DWORD /d 1 /f
-
-# Virtualization-Based Security
-reg add "HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard" /v EnableVirtualizationBasedSecurity     /t REG_DWORD /d 1 /f
-reg add "HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard" /v RequirePlatformSecurityFeatures       /t REG_DWORD /d 1 /f
-
-# Credential Guard
-reg add "HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\CredentialGuard" /v Enabled /t REG_DWORD /d 1 /f
-reg add "HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\CredentialGuard" /v Locked  /t REG_DWORD /d 0 /f
-
-# Verificar tras reinicio:
-# Get-CimInstance -ClassName Win32_DeviceGuard -Namespace root\Microsoft\Windows\DeviceGuard
-Restart-Computer -Confirm
-```
-
----
-
-### Bloque B — Anti-manipulación de controles defensivos
-
----
-
-#### MED-04
-
-| Campo | Detalle |
-|-------|---------|
-| **ID Incidente** | INC-03 |
-| **Vector de ataque** | Desactivación completa del Firewall de Windows con un único comando `netsh advfirewall set allprofiles state off` — T1562.004 |
-| **Nueva medida de seguridad** | Firewall restrictivo con política de denegación por defecto, reglas mínimas explícitas y tarea programada SYSTEM de autorremediación cada 5 minutos |
-| **Justificación técnica** | El Red Team desactivó el firewall en la sesión del 25/03 y este permaneció inactivo hasta la recuperación el 07/04 (13 días). La tarea de enforcement como `NT AUTHORITY\SYSTEM` detecta perfiles deshabilitados y los restaura automáticamente, reduciendo el MTTR por debajo de 5 minutos sin necesidad de SIEM |
-| **Método de aplicación** | PowerShell + Tarea Programada |
-
-```powershell
-# Aplicar política restrictiva
-Set-NetFirewallProfile -All -Enabled True -DefaultInboundAction Block -DefaultOutboundAction Block
-New-NetFirewallRule -DisplayName "Allow_HTTP_In"  -Direction Inbound -Protocol TCP -LocalPort 80   -Action Allow -ErrorAction SilentlyContinue
-New-NetFirewallRule -DisplayName "Allow_HTTPS_In" -Direction Inbound -Protocol TCP -LocalPort 443  -Action Allow -ErrorAction SilentlyContinue
-New-NetFirewallRule -DisplayName "Allow_SSH_MCP"  -Direction Inbound -Protocol TCP -LocalPort 22   -Action Allow -RemoteAddress 192.168.56.1 -ErrorAction SilentlyContinue
-New-NetFirewallRule -DisplayName "Allow_MCP_SSE"  -Direction Inbound -Protocol TCP -LocalPort 8000 -Action Allow -RemoteAddress 192.168.56.1 -ErrorAction SilentlyContinue
-
-# Crear script de enforcement
-$scriptBlock = @'
-$disabled = Get-NetFirewallProfile | Where-Object { $_.Enabled -eq $false }
-if ($disabled) {
-    Set-NetFirewallProfile -All -Enabled True -DefaultInboundAction Block -DefaultOutboundAction Block
-    New-EventLog -LogName Application -Source "Enforce_Firewall" -ErrorAction SilentlyContinue
-    Write-EventLog -LogName Application -Source "Enforce_Firewall" -EventId 5001 -EntryType Warning `
-        -Message "ALERTA: Firewall reactivado automaticamente. Perfiles deshabilitados: $($disabled.Name -join ', ')"
-}
-'@
-$scriptPath = "C:\Windows\System32\Drivers\en-US\NetworkData\Enforce_Firewall.ps1"
-$scriptBlock | Out-File -FilePath $scriptPath -Encoding ASCII -Force
-
-# Registrar tarea programada
-$action    = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
-$trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration ([TimeSpan]::MaxValue)
-$principal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -RunLevel Highest
-Register-ScheduledTask -TaskName "Enforce_Firewall" -Action $action -Trigger $trigger -Principal $principal -Force
-```
-
----
-
-#### MED-05
-
-| Campo | Detalle |
-|-------|---------|
-| **ID Incidente** | INC-04 |
-| **Vector de ataque** | Desactivación de BitLocker con `manage-bde -off C:`, exponiendo datos del VDI a extracción offline — T1486 |
-| **Nueva medida de seguridad** | Re-cifrado BitLocker AES-256 con protector TPM + clave de recuperación offline; ACL restrictiva sobre `manage-bde.exe`; tarea de verificación periódica del estado de cifrado |
-| **Justificación técnica** | El Red Team desactivó el cifrado facilitando el acceso posterior al archivo VDI desde el host (`VBoxManage debugvm dumpvmcore`). La ACL impide que sesiones interactivas sin privilegios explícitos ejecuten `manage-bde`; la tarea de verificación detecta desactivaciones no autorizadas |
-| **Método de aplicación** | PowerShell + `icacls` + Tarea Programada |
-
-```powershell
-# Re-cifrar disco
-Enable-BitLocker -MountPoint "C:" -EncryptionMethod Aes256 -TpmProtector -UsedSpaceOnly
-$rec = Add-BitLockerKeyProtector -MountPoint "C:" -RecoveryPasswordProtector
-Write-Host "[!] GUARDAR OFFLINE — Clave de recuperacion: $($rec.KeyProtector.RecoveryPassword)" -ForegroundColor Yellow
-
-# Restringir acceso al binario manage-bde
-icacls "C:\Windows\System32\manage-bde.exe" /inheritance:r /grant "SYSTEM:(F)" "BUILTIN\Administrators:(RX)"
-
-# Script de verificación periódica
-$blScript = @'
-$vol = Get-BitLockerVolume -MountPoint "C:"
-if ($vol.ProtectionStatus -ne "On" -or $vol.VolumeStatus -ne "FullyEncrypted") {
-    New-EventLog -LogName Application -Source "Enforce_BitLocker" -ErrorAction SilentlyContinue
-    Write-EventLog -LogName Application -Source "Enforce_BitLocker" -EventId 5002 -EntryType Warning `
-        -Message "ALERTA: BitLocker no activo. Estado: $($vol.ProtectionStatus) / $($vol.VolumeStatus)"
-    Enable-BitLocker -MountPoint "C:" -EncryptionMethod Aes256 -TpmProtector -UsedSpaceOnly -ErrorAction SilentlyContinue
-}
-'@
-$blScript | Out-File "C:\Windows\System32\Drivers\en-US\NetworkData\Enforce_BitLocker.ps1" -Encoding ASCII -Force
-
-$blAction  = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File C:\Windows\System32\Drivers\en-US\NetworkData\Enforce_BitLocker.ps1"
-$blTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 15) -RepetitionDuration ([TimeSpan]::MaxValue)
-Register-ScheduledTask -TaskName "Enforce_BitLocker" -Action $blAction -Trigger $blTrigger -User "SYSTEM" -RunLevel Highest -Force
-```
-
----
-
-#### MED-06
-
-| Campo | Detalle |
-|-------|---------|
-| **ID Incidente** | INC-05 |
-| **Vector de ataque** | Punto ciego Sysmon: configuración `WinNetSvc.xml` solo monitorizaba hijos de `w3wp.exe` (IIS), generando 0 eventos ProcessCreate (ID 1) durante la sesión de consola del 25/03/2026 |
-| **Nueva medida de seguridad** | Ampliación de `WinNetSvc.xml` con reglas ProcessCreate para shells interactivas, herramientas de gestión críticas y detección de comandos de degradación de defensas |
-| **Justificación técnica** | El Red Team ejecutó `netsh`, `manage-bde`, `net user`, `net localgroup` y `shutdown` sin generar un solo evento de proceso. Las nuevas reglas capturan cualquier ejecución de estas herramientas independientemente del proceso padre, cerrando el punto ciego de consola interactiva |
-| **Método de aplicación** | XML Sysmon + PowerShell (ver Sección 5 para el XML completo) |
-
-```powershell
-# Recargar Sysmon con la nueva configuración (ver Sección 5)
-$xmlPath = "C:\Windows\System32\Drivers\en-US\NetworkData\WinNetSvc.xml"
-C:\Windows\WinNetSvc.exe -c $xmlPath
-Write-Host "[+] Sysmon recargado con reglas de consola interactiva" -ForegroundColor Green
-
-# Validar: lanzar un comando y verificar que genera evento ID 1
-cmd /c whoami
-Start-Sleep -Seconds 2
-Get-WinEvent -LogName "Microsoft-Windows-Sysmon/Operational" -MaxEvents 5 |
-    Where-Object { $_.Id -eq 1 } |
-    Select-Object TimeCreated, Message
-```
-
----
-
-### Bloque C — Contención de herramientas nativas (LOLBins)
-
----
-
-#### MED-07
-
-| Campo | Detalle |
-|-------|---------|
-| **ID Incidente** | INC-07 |
-| **Vector de ataque** | Reversión de LOLBins renombrados a `.bak` (`curl.exe.bak`, `tar.exe.bak`) para descargar e instalar Python 3.12 fileless, evadiendo la táctica "tierra quemada" — T1218 |
-| **Nueva medida de seguridad** | Permisos NTFS de solo lectura sobre archivos `.bak` en System32; AppLocker con reglas de denegación para `net.exe`, `netsh.exe`, `reg.exe` y `manage-bde.exe` para usuarios interactivos |
-| **Justificación técnica** | El Red Team copió binarios desde `.bak` al directorio `%TEMP%` para evadir el renombrado. La ACL de solo lectura impide la copia sin privilegios SYSTEM; AppLocker bloquea la ejecución de las herramientas de administración más peligrosas desde sesiones interactivas |
-| **Método de aplicación** | `icacls` + AppLocker (GPO local) |
-
-```powershell
-# ACL restrictiva sobre archivos .bak en System32
-Get-ChildItem "C:\Windows\System32\*.bak" -ErrorAction SilentlyContinue | ForEach-Object {
-    icacls $_.FullName /inheritance:r /grant "SYSTEM:(F)" "BUILTIN\Administrators:(R)"
-    Write-Host "[+] ACL aplicada: $($_.Name)" -ForegroundColor Green
-}
-
-# Habilitar servicio AppLocker
-Set-Service AppIDSvc -StartupType Automatic
-Start-Service AppIDSvc -ErrorAction SilentlyContinue
-
-# Crear directorio de políticas AppLocker y aplicar política XML completa
-$applockerDir = "$env:SystemRoot\System32\AppLocker"
-New-Item -ItemType Directory -Path $applockerDir -Force | Out-Null
-
-$applockerXml = @"
-<AppLockerPolicy Version="1">
-  <RuleCollection Type="Exe" EnforcementMode="Enabled">
-    <FilePathRule Id="11111111-0000-0000-0000-000000000001" Name="Allow Administrators" Description="" UserOrGroupSid="S-1-5-32-544" Action="Allow">
-      <Conditions><FilePathCondition Path="*"/></Conditions>
-    </FilePathRule>
-    <FilePathRule Id="11111111-0000-0000-0000-000000000002" Name="Allow SYSTEM" Description="" UserOrGroupSid="S-1-5-18" Action="Allow">
-      <Conditions><FilePathCondition Path="*"/></Conditions>
-    </FilePathRule>
-    <FilePathRule Id="99999999-0001-0001-0001-000000000001" Name="Deny net.exe - Everyone" Description="Bloquear creacion de cuentas" UserOrGroupSid="S-1-1-0" Action="Deny">
-      <Conditions><FilePathCondition Path="%SYSTEM32%\net.exe"/></Conditions>
-    </FilePathRule>
-    <FilePathRule Id="99999999-0001-0001-0001-000000000002" Name="Deny netsh.exe - Everyone" Description="Bloquear modificacion firewall" UserOrGroupSid="S-1-1-0" Action="Deny">
-      <Conditions><FilePathCondition Path="%SYSTEM32%\netsh.exe"/></Conditions>
-    </FilePathRule>
-    <FilePathRule Id="99999999-0001-0001-0001-000000000003" Name="Deny manage-bde.exe - Everyone" Description="Bloquear gestion BitLocker" UserOrGroupSid="S-1-1-0" Action="Deny">
-      <Conditions><FilePathCondition Path="%SYSTEM32%\manage-bde.exe"/></Conditions>
-    </FilePathRule>
-    <FilePathRule Id="99999999-0001-0001-0001-000000000004" Name="Deny reg.exe - Everyone" Description="Bloquear edicion registro" UserOrGroupSid="S-1-1-0" Action="Deny">
-      <Conditions><FilePathCondition Path="%SYSTEM32%\reg.exe"/></Conditions>
-    </FilePathRule>
-  </RuleCollection>
-</AppLockerPolicy>
-"@
-$applockerXml | Out-File "$applockerDir\Policy.xml" -Encoding Unicode -Force
-Set-AppLockerPolicy -XmlPolicy "$applockerDir\Policy.xml" -ErrorAction SilentlyContinue
-gpupdate /force
-```
-
----
-
-#### MED-08
-
-| Campo | Detalle |
-|-------|---------|
-| **ID Incidente** | INC-08 |
-| **Vector de ataque** | Historial PowerShell (`ConsoleHost_history.txt`) almacenado en texto claro expuso la contraseña de la cuenta backdoor `yishiego` (`EstuveAqui.1234`) — T1059 |
-| **Nueva medida de seguridad** | Deshabilitar la persistencia de historial PSReadLine; habilitar Script Block Logging y Module Logging a nivel de máquina como telemetría forense alternativa |
-| **Justificación técnica** | El historial de texto plano es un artefacto forense bidireccional: beneficia al defensor pero también expone operaciones del atacante si este no lo limpia. Script Block Logging captura comandos ejecutados en el Event Log (Microsoft-Windows-PowerShell/Operational, ID 4104), que es más difícil de eliminar silenciosamente que un archivo de perfil |
-| **Método de aplicación** | Registro de Windows (equivalente a GPO) |
-
-```powershell
-# Deshabilitar persistencia de historial PSReadLine (perfil de máquina)
-if (-not (Test-Path $PROFILE.AllUsersAllHosts)) {
-    New-Item -Path $PROFILE.AllUsersAllHosts -ItemType File -Force | Out-Null
-}
-Add-Content -Path $PROFILE.AllUsersAllHosts -Value "`nSet-PSReadLineOption -HistorySaveStyle SaveNothing"
-
-# Script Block Logging (captura todo el código PowerShell ejecutado — Event ID 4104)
-reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging" /v EnableScriptBlockLogging           /t REG_DWORD /d 1 /f
-reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging" /v EnableScriptBlockInvocationLogging /t REG_DWORD /d 1 /f
-
-# Module Logging (registra todos los módulos y cmdlets usados — Event ID 4103)
-reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ModuleLogging" /v EnableModuleLogging /t REG_DWORD /d 1 /f
-reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ModuleLogging\ModuleNames" /v * /t REG_SZ /d * /f
-
-# Eliminar historial existente de todos los perfiles de usuario
-Get-ChildItem "C:\Users\*\AppData\Roaming\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt" -ErrorAction SilentlyContinue |
-    Remove-Item -Force -ErrorAction SilentlyContinue
-Write-Host "[+] Historial PowerShell eliminado y logging habilitado" -ForegroundColor Green
-```
-
----
-
-### Bloque D — Evasión forense y disponibilidad
-
----
-
-#### MED-09
-
-| Campo | Detalle |
-|-------|---------|
-| **ID Incidente** | INC-06 |
-| **Vector de ataque** | Apagado inmediato del sistema con `shutdown /s /t 0` para destruir evidencia volátil (RAM, conexiones de red, procesos) — T1529 |
-| **Nueva medida de seguridad** | Auditoría de eventos de apagado; restricción de `SeShutdownPrivilege`; tarea de monitorización post-arranque para correlacionar reinicios con sesiones interactivas recientes |
-| **Justificación técnica** | Los eventos 1074/6006/6008 registran apagados con causa y usuario responsable. Restringir `SeShutdownPrivilege` a cuentas de servicio del sistema (no a cuentas interactivas) añade una capa de control; la tarea `BootMonitor` correlaciona reinicios inesperados con logons LogonType 2 previos y genera alerta en Application Log |
-| **Método de aplicación** | `auditpol` + `secedit` + Tarea Programada |
-
-```powershell
-# Auditoría de apagados
-auditpol /set /subcategory:"System Shutdown"    /success:enable /failure:enable
-auditpol /set /subcategory:"Other System Events" /success:enable /failure:enable
-
-# Exportar política de derechos de usuario y verificar SeShutdownPrivilege
-secedit /export /cfg C:\sec_shutdown.cfg
-# La línea debe quedar: SeShutdownPrivilege = *S-1-5-32-544 (solo grupo Administradores)
-# Ajustar manualmente si hay cuentas individuales adicionales y reimportar:
-# secedit /configure /db C:\secedit.sdb /cfg C:\sec_shutdown.cfg /areas USER_RIGHTS
-Remove-Item C:\sec_shutdown.cfg -Force -ErrorAction SilentlyContinue
-
-# Tarea de monitorización post-arranque
-$bootScript = @'
-Start-Sleep -Seconds 30
-$lastBoot     = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
-$recentLogons = Get-WinEvent -FilterHashtable @{LogName='Security'; Id=4624; StartTime=$lastBoot.AddMinutes(-20)} -ErrorAction SilentlyContinue |
-    Where-Object { $_.Properties[8].Value -eq 2 }
-if ($recentLogons) {
-    New-EventLog -LogName Application -Source "BootMonitor" -ErrorAction SilentlyContinue
-    Write-EventLog -LogName Application -Source "BootMonitor" -EventId 5003 -EntryType Warning `
-        -Message "ALERTA: Sistema reiniciado tras sesion interactiva reciente (LogonType 2). Posible anti-forensics."
-}
-'@
-$bootScript | Out-File "C:\Windows\System32\Drivers\en-US\NetworkData\BootMonitor.ps1" -Encoding ASCII -Force
-Register-ScheduledTask -TaskName "BootMonitor" `
-    -Action    (New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File C:\Windows\System32\Drivers\en-US\NetworkData\BootMonitor.ps1") `
-    -Trigger   (New-ScheduledTaskTrigger -AtStartup) `
-    -User      "SYSTEM" `
-    -RunLevel  Highest `
-    -Force
-```
-
----
-
-### Bloque E — Capa hypervisor y host
-
----
-
-#### MED-10
-
-| Campo | Detalle |
-|-------|---------|
-| **ID Incidente** | INC-09 |
-| **Vector de ataque** | Extracción del volcado completo de memoria de la VM mediante `VBoxManage debugvm WIN-VNQSUL89MUA dumpvmcore --filename memdump.elf` desde el host — T1003.001 |
-| **Nueva medida de seguridad** | Deshabilitar clipboard y Drag-and-Drop bidireccional en VirtualBox; restringir ACL del binario `VBoxManage.exe` a Administradores del host; habilitar VBS/HVCI en el host Windows |
-| **Justificación técnica** | El TCB (Trusted Computing Base) incluye el hypervisor: todo el hardening del guest es ineficaz si el host puede volcar la RAM del VM. Restringir `VBoxManage.exe` impide que usuarios sin privilegios generen volcados; VBS/HVCI en el host eleva el coste de compromiso del hypervisor |
-| **Método de aplicación** | `VBoxManage` (host) + `icacls` (host) + Registro (host) |
-
-```powershell
-# Ejecutar en el HOST Windows (no en la VM)
-
-# Deshabilitar canales de comunicación VM-Host
-$vbox   = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
-$vmName = "WIN-VNQSUL89MUA"  # Ajustar al nombre exacto en VirtualBox
-& $vbox modifyvm $vmName --clipboard-mode  disabled
-& $vbox modifyvm $vmName --draganddrop     disabled
-& $vbox modifyvm $vmName --vrde            off
-
-# Restringir ejecución de VBoxManage a Administradores del host
-icacls $vbox /inheritance:r /grant "BUILTIN\Administrators:(RX)" "SYSTEM:(F)"
-icacls $vbox /deny "BUILTIN\Users:(X)"
-
-# Habilitar VBS/HVCI en el host (requiere reinicio del host)
-reg add "HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard" /v EnableVirtualizationBasedSecurity /t REG_DWORD /d 1 /f
-reg add "HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity" /v Enabled /t REG_DWORD /d 1 /f
-```
-
----
-
-#### MED-11
-
-| Campo | Detalle |
-|-------|---------|
-| **ID Incidente** | INC-09 |
-| **Vector de ataque** | Secreto JWT (`SecretKey`) residente en memoria del worker IIS (`w3wp.exe`) y extraíble con Volatility desde el volcado de RAM — T1552 |
-| **Nueva medida de seguridad** | Rotación inmediata del `SecretKey` JWT con entropía de 256 bits; almacenamiento protegido mediante DPAPI (scope `LocalMachine`); reinicio del Application Pool para invalidar todos los tokens forjados |
-| **Justificación técnica** | Volatility localizó el `SecretKey` como cadena de texto plano en el heap del proceso. DPAPI ata el secreto al contexto criptográfico de la máquina, por lo que la **clave de larga duración** en disco queda cifrada e inusable desde otro sistema aunque se extraiga el VDI |
-| **Método de aplicación** | PowerShell (guest — VM) |
-
-```powershell
-# Generar nuevo SecretKey de 256 bits de entropía
-Add-Type -AssemblyName System.Security
-$bytes = New-Object byte[] 32
-[Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
-$plainSecret = [Convert]::ToBase64String($bytes)
-
-# Cifrar con DPAPI (LocalMachine scope — no portable entre máquinas)
-$protected = [Security.Cryptography.ProtectedData]::Protect(
-    [Text.Encoding]::UTF8.GetBytes($plainSecret),
-    $null,
-    [Security.Cryptography.DataProtectionScope]::LocalMachine
+# Reglas de servicio (idempotente)
+$operationalRules = @(
+    @{ Name = 'Allow_HTTP_In';    Port = 80  },
+    @{ Name = 'Allow_HTTPS_In';   Port = 443 },
+    @{ Name = 'Allow_SSH_MCP';    Port = 22  },   # OpenSSH — canal LLM/analista
+    @{ Name = 'Allow_MCP_SSE';    Port = 8000 }   # MCP SSE (si está desplegado)
 )
-
-# Persistir el secreto como variable de entorno de máquina
-[Environment]::SetEnvironmentVariable("Jwt__SecretKey", $plainSecret, "Machine")
-Write-Host "[!] SecretKey rotado. Todos los JWT anteriores quedan INVALIDADOS." -ForegroundColor Yellow
-
-# Reiniciar AppPool para recargar la variable de entorno
-Import-Module WebAdministration
-Restart-WebAppPool -Name "SecureCatalogPool"
-Write-Host "[+] AppPool SecureCatalogPool reiniciado" -ForegroundColor Green
-```
-
----
-
-### Bloque F — Capa aplicación web
-
----
-
-#### MED-12
-
-| Campo | Detalle |
-|-------|---------|
-| **ID Incidente** | INC-10 |
-| **Vector de ataque** | Bypass del rate limiter de la aplicación falsificando la cabecera `X-Forwarded-For` con IPs distintas por petición — T1110.003 |
-| **Nueva medida de seguridad** | Reconfigurar el rate limiter de ASP.NET Core para particionar exclusivamente por `HttpContext.Connection.RemoteIpAddress`; eliminar toda confianza en `X-Forwarded-For` al no existir proxy reverso de confianza |
-| **Justificación técnica** | El Red Team envió 7 peticiones con IPs falsificadas en `X-Forwarded-For` sin activar `RATE_LIMIT_EXCEEDED`. En este despliegue IIS directamente expuesto (sin NGINX/HAProxy delante), la IP de conexión TCP real (`RemoteIpAddress`) es el único identificador de cliente verificable e inmanipulable desde el exterior |
-| **Método de aplicación** | Código C# — `Program.cs` de SecureCatalog |
-
-```csharp
-// En Program.cs — reemplazar la configuración del rate limiter:
-
-// INCORRECTO (vulnerable a X-Forwarded-For spoofing):
-// var clientIp = context.Request.Headers["X-Forwarded-For"].FirstOrDefault()
-//     ?? context.Connection.RemoteIpAddress?.ToString();
-
-// CORRECTO — usar SOLO la IP de la conexión TCP subyacente:
-builder.Services.AddRateLimiter(options =>
-{
-    options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
-    {
-        // RemoteIpAddress es la IP de la conexión TCP real, inmanipulable desde cabeceras HTTP
-        var remoteIp = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
-        return RateLimitPartition.GetFixedWindowLimiter(remoteIp, _ => new FixedWindowRateLimiterOptions
-        {
-            PermitLimit    = 10,
-            Window         = TimeSpan.FromMinutes(5),
-            QueueLimit     = 0,
-            QueueProcessingOrder = QueueProcessingOrder.OldestFirst
-        });
-    });
-    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
-});
-
-// NO añadir app.UseForwardedHeaders() sin configurar KnownProxies explícitamente.
-```
-
----
-
-#### MED-13
-
-| Campo | Detalle |
-|-------|---------|
-| **ID Incidente** | (Hardening proactivo — superficie criptográfica) |
-| **Vector de ataque** | TLS 1.0 y TLS 1.1 potencialmente habilitados en SCHANNEL, exponiendo la única superficie de red visible (puerto 443) a ataques POODLE y BEAST — T1557 |
-| **Nueva medida de seguridad** | Deshabilitar TLS 1.0 y TLS 1.1 en SCHANNEL; forzar exclusivamente TLS 1.2 y TLS 1.3 |
-| **Justificación técnica** | Reduce la superficie criptográfica débil en el único servicio expuesto en red. TLS 1.3 elimina la negociación de cipher suites débiles y proporciona Perfect Forward Secrecy obligatorio |
-| **Método de aplicación** | Registro de Windows |
-
-```powershell
-# Deshabilitar protocolos legacy
-foreach ($ver in @("SSL 2.0", "SSL 3.0", "TLS 1.0", "TLS 1.1")) {
-    $path = "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\$ver\Server"
-    New-Item -Path $path -Force | Out-Null
-    New-ItemProperty -Path $path -Name "Enabled"           -Value 0 -PropertyType DWord -Force
-    New-ItemProperty -Path $path -Name "DisabledByDefault"  -Value 1 -PropertyType DWord -Force
-}
-
-# Habilitar protocolos modernos
-foreach ($ver in @("TLS 1.2", "TLS 1.3")) {
-    $path = "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\$ver\Server"
-    New-Item -Path $path -Force | Out-Null
-    New-ItemProperty -Path $path -Name "Enabled"           -Value 1 -PropertyType DWord -Force
-    New-ItemProperty -Path $path -Name "DisabledByDefault"  -Value 0 -PropertyType DWord -Force
-}
-
-# Aplicar cambios (requiere reinicio de IIS)
-iisreset /restart
-Write-Host "[+] SCHANNEL configurado: solo TLS 1.2 y TLS 1.3" -ForegroundColor Green
-```
-
----
-
-### Bloque G — Canal de gestión MCP/SSH
-
----
-
-#### MED-14
-
-| Campo | Detalle |
-|-------|---------|
-| **ID Incidente** | INC-11 (post-restauración) |
-| **Vector de ataque** | Canal SSH restaurado con autenticación por contraseña habilitada; puerto 8000 abierto sin restricción de IP; credenciales de `user2` conocidas por el Red Team |
-| **Nueva medida de seguridad** | SSH solo por clave pública (`PasswordAuthentication no`); shell `cmd.exe` como shell por defecto de SSH para transporte MCP sin BOM; reglas de firewall SSH y MCP restringidas exclusivamente a `192.168.56.1` |
-| **Justificación técnica** | El informe de restauración documenta que el Red Team cambió la contraseña de `user2` y configura claves autorizadas. Deshabilitar la autenticación por contraseña elimina la reutilización de credenciales filtradas; `cmd.exe` como shell evita que PowerShell inyecte marcas BOM en el stream stdio del protocolo MCP JSON-RPC |
-| **Método de aplicación** | Registro de Windows + edición de `sshd_config` + PowerShell |
-
-```powershell
-# Shell limpia para transporte MCP (cmd.exe no inyecta BOM en stdio)
-reg add "HKLM\SOFTWARE\OpenSSH" /v DefaultShell /d "C:\Windows\System32\cmd.exe" /f
-
-# Deshabilitar autenticación por contraseña en sshd_config
-$cfg = "C:\ProgramData\ssh\sshd_config"
-$content = Get-Content $cfg
-$content = $content -replace '^#?PasswordAuthentication.*',   'PasswordAuthentication no'
-$content = $content -replace '^#?PubkeyAuthentication.*',     'PubkeyAuthentication yes'
-$content = $content -replace '^#?PermitEmptyPasswords.*',     'PermitEmptyPasswords no'
-$content = $content -replace '^#?PermitRootLogin.*',          'PermitRootLogin no'
-$content | Set-Content $cfg -Encoding UTF8
-
-# Asegurar que el bloque Match Group administrators está descomentado
-if ($content -notmatch '^Match Group administrators') {
-    Add-Content $cfg "`nMatch Group administrators`n    AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys"
-}
-
-# Permisos NTFS estrictos sobre authorized_keys (requisito OpenSSH)
-icacls "C:\ProgramData\ssh\administrators_authorized_keys" /inheritance:r /grant "*S-1-5-32-544:F" "SYSTEM:F"
-icacls "C:\ProgramData\ssh\administrators_authorized_keys" /setowner "*S-1-5-32-544"
-
-# Restringir reglas de firewall a IP del host analista
-Set-NetFirewallRule -DisplayName "Allow_SSH_MCP" -RemoteAddress 192.168.56.1 -ErrorAction SilentlyContinue
-Set-NetFirewallRule -DisplayName "Allow_MCP_SSE" -RemoteAddress 192.168.56.1 -ErrorAction SilentlyContinue
-
-# Reiniciar servicio SSH
-Restart-Service sshd
-Write-Host "[+] SSH configurado: solo clave publica, restringido a 192.168.56.1" -ForegroundColor Green
-```
-
----
-
-#### MED-15
-
-| Campo | Detalle |
-|-------|---------|
-| **ID Incidente** | INC-12 (ausencia de SIEM centralizado) |
-| **Vector de ataque** | Degradación silenciosa de controles defensivos sin mecanismo de alerta centralizado (Wazuh no disponible) |
-| **Nueva medida de seguridad** | Bucle cerrado de autorremediación agéntica vía MCP: servidor Python con 4 herramientas de auditoría y corrección automática |
-| **Justificación técnica** | Sin SIEM, las alteraciones de controles (firewall desactivado, cuenta nueva en Administradores) pueden pasar desapercibidas días o semanas. El servidor MCP expone herramientas atómicas que el agente IA consume para detectar desviaciones del baseline y revertirlas en caliente, reduciendo el MTTR objetivo por debajo de 5 minutos |
-| **Método de aplicación** | Servidor MCP Python (`C:\Python312\mcp_server.py`) + Tarea programada (ver Sección 6) |
-
----
-
-## 5. Configuración Sysmon — Reglas de Consola Interactiva (MED-06)
-
-Integrar el siguiente bloque **dentro** de `<EventFiltering>` en `C:\Windows\System32\Drivers\en-US\NetworkData\WinNetSvc.xml`, antes del cierre `</EventFiltering>`:
-
-```xml
-<!--
-  ===================================================================
-    RULE GROUP: CONSOLA INTERACTIVA (Post-Incidente MED-06)
-    Cierra el punto ciego: ProcessCreate en sesiones LogonType 2.
-    Binarios exactos usados por el Red Team el 25/03/2026.
-  ===================================================================
--->
-<RuleGroup name="ConsolaInteractiva" groupRelation="or">
-  <ProcessCreate onmatch="include">
-
-    <!-- Shells como proceso lanzado o como proceso padre -->
-    <Image condition="image">powershell.exe</Image>
-    <Image condition="image">cmd.exe</Image>
-    <Image condition="image">pwsh.exe</Image>
-    <ParentImage condition="image">powershell.exe</ParentImage>
-    <ParentImage condition="image">cmd.exe</ParentImage>
-    <ParentImage condition="image">pwsh.exe</ParentImage>
-
-    <!-- Motores de script Windows -->
-    <Image condition="image">wscript.exe</Image>
-    <Image condition="image">cscript.exe</Image>
-
-    <!-- Herramientas usadas en el ataque confirmado -->
-    <Image condition="image">net.exe</Image>
-    <Image condition="image">net1.exe</Image>
-    <Image condition="image">netsh.exe</Image>
-    <OriginalFileName condition="is">manage-bde.exe</OriginalFileName>
-    <OriginalFileName condition="is">shutdown.exe</OriginalFileName>
-    <OriginalFileName condition="is">reg.exe</OriginalFileName>
-    <OriginalFileName condition="is">sc.exe</OriginalFileName>
-    <OriginalFileName condition="is">whoami.exe</OriginalFileName>
-
-  </ProcessCreate>
-</RuleGroup>
-
-<!--
-  ===================================================================
-    RULE GROUP: MANIPULACION DE DEFENSAS (Post-Incidente MED-06)
-    Detectar comandos de degradación de controles de seguridad
-    independientemente del proceso que los lanza.
-  ===================================================================
--->
-<RuleGroup name="DefensaDegradada" groupRelation="or">
-  <ProcessCreate onmatch="include">
-    <CommandLine condition="contains">advfirewall set</CommandLine>
-    <CommandLine condition="contains">firewall set rule</CommandLine>
-    <CommandLine condition="contains">manage-bde -off</CommandLine>
-    <CommandLine condition="contains">manage-bde -pause</CommandLine>
-    <CommandLine condition="contains">manage-bde -disable</CommandLine>
-    <CommandLine condition="contains">net user</CommandLine>
-    <CommandLine condition="contains">net localgroup</CommandLine>
-    <CommandLine condition="contains">shutdown /s</CommandLine>
-    <CommandLine condition="contains">wevtutil cl</CommandLine>
-    <CommandLine condition="contains">wevtutil clear-log</CommandLine>
-    <CommandLine condition="contains">auditpol /clear</CommandLine>
-  </ProcessCreate>
-</RuleGroup>
-```
-
-**Aplicar y validar:**
-
-```powershell
-$xmlPath = "C:\Windows\System32\Drivers\en-US\NetworkData\WinNetSvc.xml"
-C:\Windows\WinNetSvc.exe -c $xmlPath
-
-# Test: ejecutar net.exe sin argumentos y verificar que genera ID 1
-net.exe 2>$null
-Start-Sleep -Seconds 2
-$testEvent = Get-WinEvent -LogName "Microsoft-Windows-Sysmon/Operational" -MaxEvents 10 -ErrorAction SilentlyContinue |
-    Where-Object { $_.Id -eq 1 -and $_.TimeCreated -gt (Get-Date).AddSeconds(-10) }
-
-if ($testEvent) {
-    Write-Host "[+] VALIDADO: Sysmon captura ProcessCreate en consola" -ForegroundColor Green
-} else {
-    Write-Warning "[!] No se detectaron eventos ID 1. Revisar WinNetSvc.xml"
-}
-```
-
----
-
-## 6. Playbook MCP de Autorremediación (MED-15)
-
-### 6.1 Arquitectura del bucle cerrado
-
-```
-  [ Agente IA Defensivo (Host Cursor) ]
-                  │
-        JSON-RPC / SSH (puerto 22)
-        o SSE (puerto 8000, contingencia)
-                  ▼
-        [ Servidor MCP — C:\Python312\mcp_server.py ]
-                  │
-    ┌─────────────┼─────────────┬─────────────┐
-    ▼             ▼             ▼             ▼
-check_local   enforce_     enforce_      audit_ssh
-  _users      firewall     bitlocker        _keys
-```
-
-> **Preservación del canal:** Nunca bloquear los puertos 22/8000 desde la IP `192.168.56.1` ni vaciar `administrators_authorized_keys` sin mantener la clave del agente MCP.
-
-### 6.2 Implementación del servidor MCP ampliado
-
-Desplegar en `C:\Python312\mcp_server.py`:
-
-```python
-import hashlib
-import subprocess
-from mcp.server.fastmcp import FastMCP
-
-mcp = FastMCP("WindowsCommander")
-
-# --- Configuración de referencia (ajustar tras Fase 0) ---
-ALLOWED_ADMINS = {"WIN-VNQSUL89MUA\\user2"}
-AUTHORIZED_KEYS_PATH = r"C:\ProgramData\ssh\administrators_authorized_keys"
-AUTHORIZED_KEYS_SHA256 = "REEMPLAZAR_CON_HASH_FASE_0"  # Get-FileHash -Algorithm SHA256
-HOST_ANALYST_IP = "192.168.56.1"
-
-
-def _run_ps(cmd: str) -> str:
-    r = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd],
-        capture_output=True, text=True,
-    )
-    return r.stdout + r.stderr
-
-
-@mcp.tool()
-def check_local_users() -> str:
-    """Audita miembros del grupo Administradores contra whitelist. Elimina cuentas no autorizadas."""
-    members = _run_ps(
-        "Get-LocalGroupMember -Group 'Administradores' | Select-Object -ExpandProperty Name"
-    ).strip().splitlines()
-    rogue = [m for m in members if m.strip() not in ALLOWED_ADMINS]
-    removed = []
-    for user in rogue:
-        _run_ps(f'Remove-LocalGroupMember -Group "Administradores" -Member "{user}" -ErrorAction SilentlyContinue')
-        _run_ps(f'Remove-LocalUser -Name "{user}" -ErrorAction SilentlyContinue')
-        removed.append(user)
-    if removed:
-        return f"ALERTA: Eliminadas cuentas no autorizadas: {', '.join(removed)}"
-    return f"OK: Administradores conformes: {', '.join(members)}"
-
-
-@mcp.tool()
-def enforce_firewall() -> str:
-    """Verifica y reactiva el firewall si está deshabilitado. Restaura reglas base."""
-    status = _run_ps("Get-NetFirewallProfile | Select-Object Name, Enabled | ConvertTo-Json")
-    if "false" in status.lower():
-        _run_ps("Set-NetFirewallProfile -All -Enabled True -DefaultInboundAction Block -DefaultOutboundAction Block")
-        _run_ps('New-NetFirewallRule -DisplayName "Allow_HTTP_In"  -Direction Inbound -Protocol TCP -LocalPort 80  -Action Allow -ErrorAction SilentlyContinue')
-        _run_ps('New-NetFirewallRule -DisplayName "Allow_HTTPS_In" -Direction Inbound -Protocol TCP -LocalPort 443 -Action Allow -ErrorAction SilentlyContinue')
-        _run_ps(f'New-NetFirewallRule -DisplayName "Allow_SSH_MCP" -Direction Inbound -Protocol TCP -LocalPort 22 -Action Allow -RemoteAddress {HOST_ANALYST_IP} -ErrorAction SilentlyContinue')
-        _run_ps(f'New-NetFirewallRule -DisplayName "Allow_MCP_SSE" -Direction Inbound -Protocol TCP -LocalPort 8000 -Action Allow -RemoteAddress {HOST_ANALYST_IP} -ErrorAction SilentlyContinue')
-        return "REMEDIADO: Firewall reactivado y reglas restauradas"
-    return "OK: Firewall activo en todos los perfiles"
-
-
-@mcp.tool()
-def enforce_bitlocker() -> str:
-    """Audita BitLocker en C: y reinicia cifrado si está desactivado o pausado."""
-    status = _run_ps("(Get-BitLockerVolume -MountPoint 'C:').ProtectionStatus")
-    if "On" not in status:
-        _run_ps("Enable-BitLocker -MountPoint 'C:' -EncryptionMethod Aes256 -TpmProtector -UsedSpaceOnly -ErrorAction SilentlyContinue")
-        return "REMEDIADO: BitLocker reactivado en C:"
-    return "OK: BitLocker ProtectionStatus = On"
-
-
-@mcp.tool()
-def audit_ssh_keys() -> str:
-    """Compara SHA-256 de administrators_authorized_keys con el valor de referencia."""
-    try:
-        with open(AUTHORIZED_KEYS_PATH, "rb") as f:
-            current = hashlib.sha256(f.read()).hexdigest()
-        if current != AUTHORIZED_KEYS_SHA256:
-            return f"ALERTA: Hash de claves SSH alterado. Actual: {current}"
-        return f"OK: Hash SSH conforme ({current[:16]}...)"
-    except FileNotFoundError:
-        return "ALERTA: administrators_authorized_keys no encontrado"
-
-
-@mcp.tool()
-def ejecutar_comando_powershell(comando: str) -> str:
-    """Ejecuta un comando PowerShell y devuelve el resultado (uso operativo del agente)."""
-    return _run_ps(comando)
-
-
-if __name__ == "__main__":
-    mcp.run(transport="stdio")
-```
-
-### 6.3 Tabla de herramientas y lógica de autorremediación
-
-| Herramienta MCP | Acción del agente | Lógica de autorremediación | Frecuencia |
-|-----------------|-------------------|----------------------------|------------|
-| `check_local_users` | Compara administradores locales con whitelist `{user2}` | Elimina cuentas fuera de lista (ej. `yishiego`) | Diaria + tras evento 4720 |
-| `enforce_firewall` | Verifica `Enabled` en los 3 perfiles | Reactiva firewall y restaura reglas HTTP/HTTPS/SSH/MCP | Cada 5 min (tarea) + bajo demanda |
-| `enforce_bitlocker` | Audita `ProtectionStatus` de `C:` | Reinicia cifrado si está Off o pausado | Cada 15 min (tarea) + bajo demanda |
-| `audit_ssh_keys` | Calcula SHA-256 de `administrators_authorized_keys` | Alerta si el hash difiere del valor de referencia de Fase 0 | Diaria |
-
-### 6.4 Tarea programada de auditoría agéntica
-
-```powershell
-# Script de auditoría local (complementa el bucle MCP remoto)
-$auditScript = @'
-$log = "C:\Windows\System32\Config\TxR\Diagnostics\mcp_audit.log"
-$ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-
-# Disparar verificación tras logon interactivo (4624 LogonType 2)
-$recentLogon = Get-WinEvent -FilterHashtable @{LogName='Security'; Id=4624; StartTime=(Get-Date).AddMinutes(-5)} -ErrorAction SilentlyContinue |
-    Where-Object { $_.Properties[8].Value -eq 2 }
-if ($recentLogon) {
-    "[$ts] ALERTA: Logon interactivo detectado — requiere auditoría MCP" | Out-File $log -Append -Encoding ASCII
-}
-
-# Verificación local de controles críticos (sin MCP)
-$fw = (Get-NetFirewallProfile | Where-Object { $_.Enabled -eq $false }).Count
-$bl = (Get-BitLockerVolume -MountPoint "C:").ProtectionStatus
-"[$ts] Firewall_disabled_profiles=$fw BitLocker=$bl" | Out-File $log -Append -Encoding ASCII
-'@
-$auditScript | Out-File "C:\Windows\System32\Drivers\en-US\NetworkData\MCP_AuditTrigger.ps1" -Encoding ASCII -Force
-
-Register-ScheduledTask -TaskName "MCP_AuditTrigger" `
-    -Action  (New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -File C:\Windows\System32\Drivers\en-US\NetworkData\MCP_AuditTrigger.ps1") `
-    -Trigger (New-ScheduledTaskTrigger -Daily -At "00:00" -RepetitionInterval (New-TimeSpan -Hours 1)) `
-    -User    "SYSTEM" -RunLevel Highest -Force
-```
-
-### 6.5 Configuración del cliente MCP en el host (Cursor)
-
-```json
-{
-  "mcpServers": {
-    "windows-vm-remediation": {
-      "command": "C:\\Windows\\System32\\OpenSSH\\ssh.exe",
-      "args": [
-        "-i", "C:\\Users\\<usuario>\\.ssh\\id_ed25519",
-        "-o", "BatchMode=yes",
-        "-o", "StrictHostKeyChecking=no",
-        "user2@192.168.56.10",
-        "C:\\Python312\\python.exe",
-        "C:\\Python312\\mcp_server.py"
-      ]
+foreach ($r in $operationalRules) {
+    if (-not (Get-NetFirewallRule -DisplayName $r.Name -ErrorAction SilentlyContinue)) {
+        New-NetFirewallRule -DisplayName $r.Name -Direction Inbound `
+            -Protocol TCP -LocalPort $r.Port -Action Allow | Out-Null
+    } else {
+        Enable-NetFirewallRule -DisplayName $r.Name
     }
-  }
 }
+
+# Forzar estado via registro de políticas (precedencia sobre netsh)
+$fwPolicy = 'HKLM:\SOFTWARE\Policies\Microsoft\WindowsFirewall'
+@('DomainProfile', 'StandardProfile', 'PublicProfile') | ForEach-Object {
+    $p = Join-Path $fwPolicy $_
+    if (-not (Test-Path $p)) { New-Item -Path $p -Force | Out-Null }
+    Set-ItemProperty -Path $p -Name 'EnableFirewall' -Value 1 -Type DWord
+}
+Write-Host '[+] Firewall restaurado (modo operativo: 80, 443, 22, 8000).' -ForegroundColor Green
 ```
 
----
+> **Importante:** Los puertos 22 y 8000 se eliminan del firewall únicamente al ejecutar `Cierre-Operativo.ps1` (§3). No replicar la política del antiguo `nuke.ps1` hasta esa fase.
 
-## 7. Orden de Implementación
-
-| Fase | Día | Medidas | Acciones |
-|------|-----|---------|----------|
-| **0** | Día 0 (inmediato) | Fase 0 | Eliminar `yishiego`, rotar `user2`, restaurar firewall y BitLocker |
-| **1** | Día 0 | MED-01, MED-02, MED-04, MED-05 | Postura mínima operativa |
-| **2** | Día 1 | MED-06, MED-08, MED-09 | Telemetría y anti-forensics |
-| **3** | Día 2 | MED-03, MED-07, MED-14 | Reinicio requerido (Credential Guard, AppLocker) |
-| **4** | Día 3 | MED-10, MED-11, MED-12, MED-13 | Capa host + aplicación |
-| **5** | Continuo | MED-15 | Bucle agéntico MCP |
-
----
-
-## 8. KPIs de Validación Post-Implementación
-
-| KPI | Indicador | Fórmula / Criterio | Frecuencia | Objetivo | Comando de verificación |
-|-----|-----------|-------------------|------------|----------|-------------------------|
-| **MTTR-A** | Tiempo medio de contención agéntica | Tiempo desde alteración de control hasta restauración por MCP | Por incidente | < 5 min | Revisar `mcp_audit.log` |
-| **TCH** | Tasa de cumplimiento de hardening | Controles conformes / Total controles × 100 | Semanal | 100 % | Ejecutar las 4 herramientas MCP |
-| **CECI** | Cobertura eventos consola interactiva | Procesos LogonType 2 logueados por Sysmon ID 1 | Mensual | 100 % | `cmd /c whoami` → verificar ID 1 |
-| **FCMCP** | Fiabilidad del canal MCP | Sesiones MCP exitosas / Total sesiones × 100 | Semanal | > 99 % | Test JSON-RPC `initialize` vía SSH |
-| **FAA** | Frecuencia de auditoría agéntica | Ejecuciones programadas + reactivas tras 4624 | Diaria | ≥ 1/día | `Get-ScheduledTask -TaskName "MCP_AuditTrigger"` |
-
-### 8.1 Checklist de verificación rápida
+### 1.3 Reactivación de BitLocker
 
 ```powershell
-# 1. Sin cuentas backdoor en Administradores
-Get-LocalGroupMember -Group "Administradores"
-
-# 2. Firewall activo en los 3 perfiles
-Get-NetFirewallProfile | Select-Object Name, Enabled, DefaultInboundAction
-
-# 3. BitLocker operativo
-manage-bde -status C:
-
-# 4. Sysmon ProcessCreate en consola
-cmd /c echo test_sysmon
-Start-Sleep 2
-Get-WinEvent -LogName "Microsoft-Windows-Sysmon/Operational" -MaxEvents 10 | Where-Object Id -eq 1
-
-# 5. SSH sin autenticación por contraseña
-Select-String -Path "C:\ProgramData\ssh\sshd_config" -Pattern "PasswordAuthentication"
-
-# 6. Auditoría de cuentas habilitada
-auditpol /get /subcategory:"User Account Management"
-
-# 7. PowerShell Script Block Logging
-reg query "HKLM\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging"
-
-# 8. TLS 1.0/1.1 deshabilitado
-reg query "HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.0\Server"
+$blv = Get-BitLockerVolume -MountPoint 'C:'
+if ($blv.ProtectionStatus -ne 'On' -or $blv.VolumeStatus -ne 'FullyEncrypted') {
+    if (-not ($blv.KeyProtector | Where-Object { $_.KeyProtectorType -eq 'Tpm' })) {
+        Add-BitLockerKeyProtector -MountPoint 'C:' -TpmProtector
+    }
+    if (-not ($blv.KeyProtector | Where-Object { $_.KeyProtectorType -eq 'RecoveryPassword' })) {
+        $recovery = Add-BitLockerKeyProtector -MountPoint 'C:' -RecoveryPasswordProtector
+        Write-Host "[!] GUARDAR clave de recuperación: $($recovery.RecoveryPassword)" -ForegroundColor Red
+    }
+    Enable-BitLocker -MountPoint 'C:' -EncryptionMethod Aes256 -TpmProtector -UsedSpaceOnly
+    Write-Host '[+] BitLocker reactivado en C:.' -ForegroundColor Green
+}
+Get-BitLockerVolume -MountPoint 'C:' | Select-Object MountPoint, VolumeStatus, ProtectionStatus
 ```
 
-### 8.2 Criterios de aceptación
+### 1.4 Restauración de configuración VirtualBox (host)
 
-| Control | Estado esperado |
-|---------|-----------------|
-| Cuenta `yishiego` | **Ausente** |
-| Firewall (Domain, Public, Private) | **Enabled = True**, DefaultInbound = Block |
-| BitLocker `C:` | **ProtectionStatus = On**, VolumeStatus = FullyEncrypted |
-| Sysmon consola | **≥ 1 evento ID 1** tras ejecutar comando en cmd |
-| SSH | **PasswordAuthentication no** |
-| Administradores locales | Solo `user2` en whitelist |
-| Hash `administrators_authorized_keys` | Coincide con valor anotado en Fase 0 |
+El despliegue inicial del Blue Team definió la VM con **2 CPUs** y **Adaptador 1: NAT** (solo para la fase de instalación) más **Adaptador 2: Host-Only** (`192.168.56.10/24`). En los pendientes de entrega figuraba **«Todo: eliminar adaptador NAT»**. Tras el incidente, la VM puede haber quedado con el adaptador NAT aún habilitado y con **4 procesadores** en lugar de los 2 originales. El informe forense no documenta explotación de red como vector de entrada; el perímetro del guest funcionó correctamente. Esta sección restaura la topología y recursos previstos al pechar la máquina.
+
+**Acciones post-incidente obligatorias (host VirtualBox, VM apagada):**
+
+#### 1.4.1 Eliminar el adaptador NAT
+
+1. `Configuración → Red → Adaptador 1` → desmarcar **Conectado** y, si la opción está disponible, seleccionar **No conectado** / deshabilitar el adaptador.
+2. Repetir la comprobación en **Adaptador 2** (y siguientes): ningún adaptador debe estar en modo **NAT**. El único adaptador activo debe ser **Host-Only** (`192.168.56.0/24`).
+3. Arrancar la VM y verificar en consola del guest:
+
+```powershell
+Get-NetAdapter | Where-Object Status -eq 'Up' | Format-Table Name, InterfaceDescription, Status -AutoSize
+ipconfig
+# Esperado: una sola interfaz activa en 192.168.56.10/24, sin dirección 10.0.2.x (rango NAT de VirtualBox)
+```
+
+#### 1.4.2 Restaurar el número de procesadores a 2
+
+La configuración baseline del Blue Team especifica **2 CPUs** (`1_blue_team_instrucciones.txt`, Fase 1.1). Si la VM tiene 4 procesadores, reducirla al valor original.
+
+1. Con la VM **apagada**: `Configuración → Sistema → Procesador`.
+2. Establecer **Número de procesadores: 2**.
+3. Aceptar y arrancar la VM. Verificar en consola:
+
+```powershell
+(Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors
+# Esperado: 2
+```
+
+**Línea de comandos VirtualBox (alternativa idempotente en el host):**
+
+```bash
+# Sustituir "NombreVM" por el nombre de la máquina en VirtualBox
+VBoxManage modifyvm "NombreVM" --nic1 none
+VBoxManage modifyvm "NombreVM" --cpus 2
+VBoxManage showvminfo "NombreVM" | findstr /i "NIC Number CPUs"
+```
+
+No se requiere acción adicional sobre UEFI ni Secure Boot: ambos se habilitaron en la Fase 1 del despliegue Blue Team antes de activar BitLocker con protector TPM.
 
 ---
 
-## 9. Resumen de Medidas
-
-| ID | Incidente | Vector MITRE | Medida | Método |
-|----|-----------|--------------|--------|--------|
-| MED-01 | INC-01 | T1078 | Bloqueo de cuenta + política de contraseña + mensaje legal | `net accounts` / Registro |
-| MED-02 | INC-02 | T1136 | Auditoría avanzada cuentas/grupos + whitelist | `auditpol` |
-| MED-03 | INC-01 | T1078/T1003 | Credential Guard + LSA Protection (RunAsPPL) | Registro |
-| MED-04 | INC-03 | T1562.004 | Firewall restrictivo + tarea enforcement 5 min | PowerShell |
-| MED-05 | INC-04 | T1486 | BitLocker + ACL manage-bde + tarea 15 min | PowerShell / `icacls` |
-| MED-06 | INC-05 | T1562.001 | Sysmon ProcessCreate consola + DetecciónDefensas | XML Sysmon |
-| MED-07 | INC-07 | T1218 | AppLocker completo (Allow+Deny) + protección .bak | GPO AppLocker |
-| MED-08 | INC-08 | T1059 | PSReadLine off + Script Block Logging | Registro |
-| MED-09 | INC-06 | T1529 | Auditoría apagados + BootMonitor arranque | `secedit` / tarea |
-| MED-10 | INC-09 | T1003.001 | Hardening VirtualBox host + VBS/HVCI | `VBoxManage` / Registro |
-| MED-11 | INC-09 | T1552 | Rotación JWT 256 bits + DPAPI + reinicio AppPool | PowerShell |
-| MED-12 | INC-10 | T1110.003 | Rate limit por IP TCP real (ignorar X-Forwarded-For) | Código C# |
-| MED-13 | Proactivo | T1557 | TLS 1.2/1.3 únicamente (SSL2/3 + TLS1.0/1.1 off) | Registro SCHANNEL |
-| MED-14 | INC-11 | — | SSH clave pública + cmd.exe shell + restricción IP | `sshd_config` / Registro |
-| MED-15 | INC-12 | — | Bucle autorremediación MCP (4 herramientas) | Python MCP + tarea |
+## 2. Medidas de Endurecimiento Avanzado
 
 ---
 
-*Fin del Plan de Securización Post-Incidente — WIN-VNQSUL89MUA*  
-*Generado conforme a MITRE ATT&CK, CIS Benchmarks Windows Server 2025 y NIST SP 800-61.*
+### MS-01 — Separación de privilegios y restricción del acceso interactivo local
+
+#### 1. ID del Incidente / Vector de Ataque
+
+**V-01.** El Red Team accedió por consola VirtualBox (LogonType 2, origen `127.0.0.1`) con credenciales de `user2`, evadiendo el perímetro de red. El hardening documentó la creación de `user1` sin privilegios como pendiente no ejecutado.
+
+#### 2. Nueva Medida de Seguridad
+
+Implementar modelo **Privileged Access Workstation** en el entorno lab:
+
+- Crear cuenta operativa `user1` (sin membresía en Administradores) para uso diario en consola.
+- Denegar logon interactivo a `user2` vía `SeDenyInteractiveLogonRight` / `SeDenyNetworkLogonRight`.
+- Restringir `SeInteractiveLogonRight` exclusivamente a `user1`.
+- Habilitar **Windows Hello for Business** con TPM 2.0 para `user1`, sustituyendo autenticación por contraseña estática.
+
+#### 3. Justificación Técnica
+
+Operar siempre como `user2` (Administrador) concede control total ante cualquier compromiso de credenciales (T1078). Separar sesión operativa (`user1`) de sesión privilegiada (`user2`, solo break-glass) reduce el impacto. Windows Hello for Business vincula autenticación a clave privada residente en TPM 2.0, inutilizable con contraseñas capturadas. La restricción de `SeInteractiveLogonRight` hace que el LSA rechace logon de cuentas no autorizadas con Event ID 4625 (`0xC000015B`).
+
+#### 4. Método de Aplicación
+
+**PowerShell (idempotente):**
+
+```powershell
+# Crear user1 si no existe ($User1Password / $plainUser1 generados en 5_2 §3)
+if (-not (Get-LocalUser -Name 'user1' -ErrorAction SilentlyContinue)) {
+    $pass = $User1Password        # SecureString; $plainUser1 en bitácora para 5_4
+    New-LocalUser -Name 'user1' -Password $pass -Description 'Cuenta operativa sin privilegios' -PasswordNeverExpires $false
+    Add-LocalGroupMember -Group 'Usuarios' -Member 'user1'
+    Write-Host '[+] user1 creado.' -ForegroundColor Green
+}
+
+# Restricción de derechos de logon via secedit
+secedit /export /cfg C:\Windows\Temp\sec_logon.cfg /quiet
+$cfg = Get-Content C:\Windows\Temp\sec_logon.cfg
+$cfg = $cfg -replace '^SeInteractiveLogonRight\s*=.*', 'SeInteractiveLogonRight = user1'
+$cfg = $cfg -replace '^SeDenyInteractiveLogonRight\s*=.*', 'SeDenyInteractiveLogonRight = user2,DefaultAccount,WDAGUtilityAccount,user3'
+$cfg = $cfg -replace '^SeDenyNetworkLogonRight\s*=.*', 'SeDenyNetworkLogonRight = user2'
+$cfg | Set-Content C:\Windows\Temp\sec_logon.cfg -Encoding Unicode
+secedit /configure /db $env:windir\security\local.sdb /cfg C:\Windows\Temp\sec_logon.cfg /areas USER_RIGHTS
+Remove-Item C:\Windows\Temp\sec_logon.cfg -Force
+gpupdate /force
+
+# Windows Hello for Business
+$whfb = 'HKLM:\SOFTWARE\Policies\Microsoft\PassportForWork'
+if (-not (Test-Path $whfb)) { New-Item -Path $whfb -Force | Out-Null }
+Set-ItemProperty -Path $whfb -Name 'Enabled' -Value 1 -Type DWord
+Set-ItemProperty -Path $whfb -Name 'RequireSecurityDevice' -Value 1 -Type DWord
+Write-Host '[+] MS-01 aplicada.' -ForegroundColor Green
+```
+
+**GPO:** `Configuración de equipo → Configuración de Windows → Configuración de seguridad → Directivas locales → Asignación de derechos de usuario → Denegar inicio de sesión local → user2`
+
+---
+
+### MS-02 — Ocultación de cuentas en pantalla de logon
+
+#### 1. ID del Incidente / Vector de Ataque
+
+**V-02.** El hardening intentó `dontdisplaylastusername` pero quedó como **PENDIENTE — No funciona**, facilitando el targeting de `user2` en consola.
+
+#### 2. Nueva Medida de Seguridad
+
+Aplicar `dontdisplaylastusername`, `DontDisplayLastUserName` y `HideFastUserSwitching` mediante registro y GPO.
+
+#### 3. Justificación Técnica
+
+Winlogon lee `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System` al renderizar la pantalla de logon. Sin estas claves, el último usuario autenticado queda visible, reduciendo el espacio de búsqueda del atacante a una sola contraseña.
+
+#### 4. Método de Aplicación
+
+**Registro:**
+
+| Key | Path | Value | Tipo | Datos |
+|-----|------|-------|------|-------|
+| HKLM | `SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System` | `dontdisplaylastusername` | REG_DWORD | `1` |
+| HKLM | `SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System` | `DontDisplayLastUserName` | REG_DWORD | `1` |
+| HKLM | `SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System` | `HideFastUserSwitching` | REG_DWORD | `1` |
+
+```powershell
+$path = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+@('dontdisplaylastusername', 'DontDisplayLastUserName', 'HideFastUserSwitching') |
+    ForEach-Object { Set-ItemProperty -Path $path -Name $_ -Value 1 -Type DWord -Force }
+gpupdate /force
+Write-Host '[+] MS-02 aplicada.' -ForegroundColor Green
+```
+
+**GPO:** `Configuración de equipo → Plantillas administrativas → Sistema → Inicio de sesión → Ocultar nombres de usuario en la pantalla de inicio de sesión → Habilitado`
+
+---
+
+### MS-03 — Protección contra desactivación del Firewall de Windows
+
+#### 1. ID del Incidente / Vector de Ataque
+
+**V-03.** El Red Team ejecutó `netsh advfirewall set allprofiles state off`, anulando la política del `nuke.ps1` hasta la recuperación del 07/04/2026.
+
+#### 2. Nueva Medida de Seguridad
+
+Defensa en profundidad en tres capas, **sin cerrar SSH ni MCP** mientras dure el modo operativo:
+
+- **GPO/registro forzado** en `HKLM:\SOFTWARE\Policies\Microsoft\WindowsFirewall` (MPSSVC ignora desactivación manual).
+- **WDAC** que deniega ejecución de `netsh.exe` en contexto interactivo (no afecta a la gestión por PowerShell remoto vía SSH).
+- **Tarea SYSTEM** de auto-remediación cada 5 minutos que restaura el firewall **y reabre los puertos 80, 443, 22 y 8000** si fueron alterados.
+
+El paso a política de solo HTTP/HTTPS (sin 22/8000) queda en `Cierre-Operativo.ps1` (§3).
+
+#### 3. Justificación Técnica
+
+`netsh.exe` comunica con BFE/mpssvc para deshabilitar `wfplwfs.sys`. Las políticas en `SOFTWARE\Policies` tienen precedencia y ACL restringida. WDAC (`CI.dll`) bloquea el proceso antes de su creación. La tarea SYSTEM restaura el estado si cualquier vía logra desactivarlo.
+
+#### 4. Método de Aplicación
+
+```powershell
+# Capa 1: Política de firewall forzada
+Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled True `
+    -DefaultInboundAction Block -DefaultOutboundAction Block -NotifyOnListen False
+
+# Capa 2: Tarea de auto-remediación (preserva puertos operativos Blue Team)
+$scriptPath = 'C:\Windows\System32\Drivers\en-US\NetworkData\Enforce-Firewall.ps1'
+@'
+$marker = 'C:\Windows\System32\Config\TxR\Diagnostics\.modo_entrega'
+if (Test-Path $marker) { return }  # Tras Cierre-Operativo.ps1, no reabrir SSH/MCP
+
+foreach ($p in Get-NetFirewallProfile) {
+    if (-not $p.Enabled) {
+        Set-NetFirewallProfile -Name $p.Name -Enabled True `
+            -DefaultInboundAction Block -DefaultOutboundAction Block
+        "$((Get-Date).ToString('o')) FIREWALL_RESTORED Profile=$($p.Name)" |
+            Out-File 'C:\Windows\System32\Config\TxR\Diagnostics\fw_enforce.log' -Append
+    }
+}
+$required = @(
+    @{ Name = 'Allow_HTTP_In';  Port = 80  },
+    @{ Name = 'Allow_HTTPS_In'; Port = 443 },
+    @{ Name = 'Allow_SSH_MCP';  Port = 22  },
+    @{ Name = 'Allow_MCP_SSE';  Port = 8000 }
+)
+foreach ($r in $required) {
+    if (-not (Get-NetFirewallRule -DisplayName $r.Name -EA SilentlyContinue)) {
+        New-NetFirewallRule -DisplayName $r.Name -Direction Inbound -Protocol TCP `
+            -LocalPort $r.Port -Action Allow | Out-Null
+    } else {
+        Enable-NetFirewallRule -DisplayName $r.Name -ErrorAction SilentlyContinue
+    }
+}
+'@ | Set-Content $scriptPath -Encoding UTF8
+
+$action    = New-ScheduledTaskAction -Execute 'powershell.exe' `
+    -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
+$trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date) `
+    -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration ([TimeSpan]::MaxValue)
+$principal = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\SYSTEM' `
+    -LogonType ServiceAccount -RunLevel Highest
+Register-ScheduledTask -TaskName 'BlueTeam_FirewallEnforce' -Action $action `
+    -Trigger $trigger -Principal $principal -Force | Out-Null
+
+# Capa 3: WDAC Deny netsh.exe
+$wdacPath = 'C:\Windows\System32\Drivers\en-US\NetworkData\Deny-Netsh.xml'
+@'
+<?xml version="1.0" encoding="utf-8"?>
+<SiPolicy xmlns="urn:schemas-microsoft-com:sipolicy">
+  <VersionEx>10.0.0.0</VersionEx>
+  <PlatformID>{2E07F7E4-194F-4B20-AB0D-4B4E82BFCA2B}</PlatformID>
+  <Rules>
+    <Rule Type="Deny" Id="ID_DENY_NETSH">
+      <Conditions>
+        <FilePublisherCondition PublisherName="O=MICROSOFT CORPORATION, L=REDMOND, S=WASHINGTON, C=US"
+          ProductName="MICROSOFT® WINDOWS® OPERATING SYSTEM" BinaryName="NETSH.EXE">
+          <BinaryVersionRange LowSection="*" HighSection="*" />
+        </FilePublisherCondition>
+      </Conditions>
+    </Rule>
+  </Rules>
+</SiPolicy>
+'@ | Set-Content $wdacPath -Encoding UTF8
+CiTool.exe --update-policy $wdacPath
+
+# Auditoría complementaria de cambios en firewall
+auditpol /set /subcategory:"MPSSVC Rule-Level Policy Change" /success:enable /failure:enable
+Write-Host '[+] MS-03 aplicada (reinicio requerido para WDAC).' -ForegroundColor Green
+```
+
+**GPO:** `Configuración de equipo → Plantillas administrativas → Red → Configuración del firewall de Windows → Perfil de dominio/privado/público → Estado del firewall → Habilitado`
+
+---
+
+### MS-04 — Protección contra desactivación de BitLocker
+
+#### 1. ID del Incidente / Vector de Ataque
+
+**V-04.** El Red Team ejecutó `manage-bde -off C:`. El protector TPM-only permitía descifrado sin factor adicional. `manage-bde.exe` no estaba en la lista de LOLBins neutralizados.
+
+#### 2. Nueva Medida de Seguridad
+
+- Mantener protector **TPM-only** (sin PIN de arranque): la VM debe poder ejecutarse en cualquier host VirtualBox sin prompt de PIN en consola.
+- Garantizar protector de **recuperación** documentado.
+- GPO FVE: `EnableBDEWithNoTPM=0`, `UseTPMPIN=0` (no exigir PIN con TPM), `RDVDenyWriteAccess=1`.
+- WDAC Deny para `manage-bde.exe` en sesiones interactivas.
+
+> **Exclusión deliberada:** No se usa TPM+PIN. Un PIN de arranque impediría o complicaría el arranque al migrar la VM entre hosts o al operar sin consola física.
+
+#### 3. Justificación Técnica
+
+El vector V-04 explotó `manage-bde -off` con volumen desbloqueado en sesión interactiva, no la ausencia de PIN. La defensa prioritaria es **WDAC** (bloqueo de `manage-bde.exe` en consola), política FVE que exige TPM y auditoría. TPM-only permite arranque automático tras migración de la VM manteniendo cifrado en reposo vinculado al vTPM del hipervisor. La clave de recuperación cubre escenarios de cambio de TPM/host.
+
+#### 4. Método de Aplicación
+
+```powershell
+$vol = Get-BitLockerVolume -MountPoint 'C:'
+if ($vol.ProtectionStatus -eq 'Off') {
+    if (-not ($vol.KeyProtector | Where-Object { $_.KeyProtectorType -eq 'Tpm' })) {
+        Add-BitLockerKeyProtector -MountPoint 'C:' -TpmProtector
+    }
+    if (-not ($vol.KeyProtector | Where-Object { $_.KeyProtectorType -eq 'RecoveryPassword' })) {
+        $recovery = Add-BitLockerKeyProtector -MountPoint 'C:' -RecoveryPasswordProtector
+        Write-Host "[!] GUARDAR clave de recuperación: $($recovery.RecoveryPassword)" -ForegroundColor Red
+    }
+    Enable-BitLocker -MountPoint 'C:' -EncryptionMethod Aes256 -TpmProtector -UsedSpaceOnly
+} elseif (-not ($vol.KeyProtector | Where-Object { $_.KeyProtectorType -eq 'Tpm' })) {
+    Add-BitLockerKeyProtector -MountPoint 'C:' -TpmProtector
+}
+
+# Política FVE via registro (sin PIN de arranque)
+$fvePath = 'HKLM:\SOFTWARE\Policies\Microsoft\FVE'
+if (-not (Test-Path $fvePath)) { New-Item -Path $fvePath -Force | Out-Null }
+Set-ItemProperty -Path $fvePath -Name 'EnableBDEWithNoTPM' -Value 0 -Type DWord
+Set-ItemProperty -Path $fvePath -Name 'UseTPMPIN'        -Value 0 -Type DWord
+Set-ItemProperty -Path $fvePath -Name 'RDVDenyWriteAccess' -Value 1 -Type DWord
+
+# WDAC Deny manage-bde.exe
+$wdacBde = 'C:\Windows\System32\Drivers\en-US\NetworkData\Deny-ManageBde.xml'
+@'
+<?xml version="1.0" encoding="utf-8"?>
+<SiPolicy xmlns="urn:schemas-microsoft-com:sipolicy">
+  <VersionEx>10.0.0.0</VersionEx>
+  <PlatformID>{2E07F7E4-194F-4B20-AB0D-4B4E82BFCA2B}</PlatformID>
+  <Rules>
+    <Rule Type="Deny" Id="ID_DENY_MANAGEBDE">
+      <Conditions>
+        <FilePublisherCondition PublisherName="O=MICROSOFT CORPORATION, L=REDMOND, S=WASHINGTON, C=US"
+          ProductName="MICROSOFT® WINDOWS® OPERATING SYSTEM" BinaryName="MANAGE-BDE.EXE">
+          <BinaryVersionRange LowSection="*" HighSection="*" />
+        </FilePublisherCondition>
+      </Conditions>
+    </Rule>
+  </Rules>
+</SiPolicy>
+'@ | Set-Content $wdacBde -Encoding UTF8
+CiTool.exe --update-policy $wdacBde
+auditpol /set /subcategory:"Other System Events" /success:enable /failure:enable
+Write-Host '[+] MS-04 aplicada.' -ForegroundColor Green
+```
+
+**GPO:** `Configuración de equipo → Plantillas administrativas → Componentes de Windows → Cifrado de unidad BitLocker → Unidades del sistema operativo → Permitir BitLocker sin un TPM compatible → Deshabilitado`; no habilitar «Requerir PIN con TPM» (VM portable entre hosts).
+
+---
+
+### MS-05 — Prevención y auto-remediación de cuentas backdoor
+
+#### 1. ID del Incidente / Vector de Ataque
+
+**V-05.** Creación de `yishiego` (Event 4720) y elevación a Administradores (Event 4732) mediante `net.exe`/`net1.exe`, no incluidos en LOLBins del hardening.
+
+#### 2. Nueva Medida de Seguridad
+
+- Auditoría Security para eventos 4720, 4722, 4732, 4738.
+- WDAC Deny para `net.exe` y `net1.exe`.
+- Tarea SYSTEM **AdminGuard** con allowlist y generación de Event ID 9001 en Application Log.
+- Log Security ampliado a 256 MB.
+
+#### 3. Justificación Técnica
+
+`net.exe` invoca `NetUserAdd` contra SAM. Sin auditoría 4720 y sin Process Create en Sysmon, la persistencia pasa desapercibida. El watchdog SYSTEM revierte membresías no autorizadas en Administradores independientemente del vector usado (`net.exe`, `New-LocalUser`, etc.).
+
+#### 4. Método de Aplicación
+
+```powershell
+auditpol /set /subcategory:"User Account Management" /success:enable /failure:enable
+auditpol /set /subcategory:"Security Group Management" /success:enable /failure:enable
+wevtutil sl Security /ms:268435456
+
+$scriptDir  = 'C:\Windows\System32\Drivers\en-US\NetworkData'
+$scriptPath = "$scriptDir\AdminGuard.ps1"
+@'
+param([string[]]$AllowList = @('user2'))
+$logSource = 'BlueteamWatchdog'
+if (-not [System.Diagnostics.EventLog]::SourceExists($logSource)) {
+    New-EventLog -LogName Application -Source $logSource -ErrorAction SilentlyContinue
+}
+Get-LocalGroupMember -Group 'Administradores' | ForEach-Object {
+    $shortName = ($_.Name -split '\\')[-1]
+    if ($shortName -notin $AllowList) {
+        Remove-LocalGroupMember -Group 'Administradores' -Member $_.Name -ErrorAction SilentlyContinue
+        Disable-LocalUser -Name $shortName -ErrorAction SilentlyContinue
+        $msg = "MS-05: Cuenta no autorizada '$shortName' eliminada de Administradores."
+        Write-EventLog -LogName Application -Source $logSource -EventId 9001 -EntryType Warning -Message $msg
+        $msg | Out-File 'C:\Windows\System32\Config\TxR\Diagnostics\admin_enforce.log' -Append
+    }
+}
+'@ | Set-Content $scriptPath -Encoding UTF8
+
+$action    = New-ScheduledTaskAction -Execute 'powershell.exe' `
+    -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`" -AllowList user2"
+$trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date) `
+    -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration ([TimeSpan]::MaxValue)
+$principal = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\SYSTEM' `
+    -LogonType ServiceAccount -RunLevel Highest
+Register-ScheduledTask -TaskName 'BlueTeam_AdminGuard' -Action $action `
+    -Trigger $trigger -Principal $principal -Settings (New-ScheduledTaskSettingsSet -Hidden) -Force | Out-Null
+
+# WDAC Deny net.exe / net1.exe
+$wdacNet = 'C:\Windows\System32\Drivers\en-US\NetworkData\Deny-Net.xml'
+@'
+<?xml version="1.0" encoding="utf-8"?>
+<SiPolicy xmlns="urn:schemas-microsoft-com:sipolicy">
+  <VersionEx>10.0.0.0</VersionEx>
+  <PlatformID>{2E07F7E4-194F-4B20-AB0D-4B4E82BFCA2B}</PlatformID>
+  <Rules>
+    <Rule Type="Deny" Id="ID_DENY_NET">
+      <Conditions>
+        <FilePublisherCondition PublisherName="O=MICROSOFT CORPORATION, L=REDMOND, S=WASHINGTON, C=US"
+          ProductName="MICROSOFT® WINDOWS® OPERATING SYSTEM" BinaryName="NET.EXE">
+          <BinaryVersionRange LowSection="*" HighSection="*" />
+        </FilePublisherCondition>
+      </Conditions>
+    </Rule>
+    <Rule Type="Deny" Id="ID_DENY_NET1">
+      <Conditions>
+        <FilePublisherCondition PublisherName="O=MICROSOFT CORPORATION, L=REDMOND, S=WASHINGTON, C=US"
+          ProductName="MICROSOFT® WINDOWS® OPERATING SYSTEM" BinaryName="NET1.EXE">
+          <BinaryVersionRange LowSection="*" HighSection="*" />
+        </FilePublisherCondition>
+      </Conditions>
+    </Rule>
+  </Rules>
+</SiPolicy>
+'@ | Set-Content $wdacNet -Encoding UTF8
+CiTool.exe --update-policy $wdacNet
+Write-Host '[+] MS-05 aplicada.' -ForegroundColor Green
+```
+
+**GPO:** `Configuración de equipo → Configuración de seguridad → Directivas de auditoría avanzada → Seguimiento detallado → Auditar administración de cuentas de usuario → Éxito y error`
+
+---
+
+### MS-06 — Cierre del punto ciego de telemetría en Sysmon
+
+#### 1. ID del Incidente / Vector de Ataque
+
+**V-06.** Sysmon registró 2.607 eventos el 25/03/2026 pero **cero** Process Create (ID 1). Las reglas `WinNetSvc.xml` solo cubrían hijos de `w3wp.exe`.
+
+#### 2. Nueva Medida de Seguridad
+
+Ampliar `WinNetSvc.xml` con grupo **HardeningConsolaInteractiva**: shells interactivas, binarios del Red Team (`netsh`, `manage-bde`, `net`, `shutdown`) y argumentos de gestión de cuentas (`localgroup`, `/add`, `advfirewall`, `-off`).
+
+#### 3. Justificación Técnica
+
+`SysmonDrv.sys` registra Process Create en `PsSetCreateProcessNotifyRoutineEx`. Las reglas XML actúan como filtro: sin coincidencia, el evento se descarta. Ampliar reglas cierra el hueco de LogonType 2 que permitió ~16 minutos de operación sin telemetría.
+
+#### 4. Método de Aplicación
+
+```powershell
+$sysmonDir = 'C:\Windows\System32\Drivers\en-US\NetworkData'
+$sysmonExe = Join-Path $sysmonDir 'WinNetSvc.exe'
+$xmlPath   = Join-Path $sysmonDir 'WinNetSvc.xml'
+
+$consoleRules = @'
+    <RuleGroup name="HardeningConsolaInteractiva" groupRelation="or">
+      <ProcessCreate onmatch="include">
+        <ParentImage condition="end with">cmd.exe</ParentImage>
+        <ParentImage condition="end with">powershell.exe</ParentImage>
+        <ParentImage condition="end with">pwsh.exe</ParentImage>
+        <Image condition="end with">cmd.exe</Image>
+        <Image condition="end with">powershell.exe</Image>
+        <Image condition="end with">pwsh.exe</Image>
+        <Image condition="end with">wscript.exe</Image>
+        <Image condition="end with">cscript.exe</Image>
+        <Image condition="end with">netsh.exe</Image>
+        <Image condition="end with">manage-bde.exe</Image>
+        <Image condition="end with">net.exe</Image>
+        <Image condition="end with">net1.exe</Image>
+        <Image condition="end with">shutdown.exe</Image>
+        <Image condition="end with">reg.exe</Image>
+        <Image condition="end with">sc.exe</Image>
+        <Rule name="AccountMgmt-localgroup" groupRelation="and">
+          <CommandLine condition="contains" ignorecase="true">localgroup</CommandLine>
+        </Rule>
+        <Rule name="AccountMgmt-add" groupRelation="and">
+          <CommandLine condition="contains">/add</CommandLine>
+        </Rule>
+        <Rule name="Firewall-off" groupRelation="and">
+          <Image condition="end with">netsh.exe</Image>
+          <CommandLine condition="contains">advfirewall</CommandLine>
+        </Rule>
+        <Rule name="BitLocker-off" groupRelation="and">
+          <Image condition="end with">manage-bde.exe</Image>
+          <CommandLine condition="contains">-off</CommandLine>
+        </Rule>
+      </ProcessCreate>
+    </RuleGroup>
+'@
+
+if (Test-Path $xmlPath) { [xml]$xml = Get-Content $xmlPath } else {
+    [xml]$xml = '<Sysmon schemaversion="4.90"><HashAlgorithms>SHA256</HashAlgorithms><EventFiltering/></Sysmon>'
+}
+if (-not ($xml.Sysmon.EventFiltering.RuleGroup | Where-Object { $_.name -eq 'HardeningConsolaInteractiva' })) {
+    $fragment = [xml]"<root>$consoleRules</root>"
+    [void]$xml.Sysmon.EventFiltering.AppendChild($xml.ImportNode($fragment.DocumentElement.FirstChild, $true))
+    $xml.Save($xmlPath)
+}
+& $sysmonExe -c $xmlPath
+Write-Host '[+] MS-06 aplicada: Sysmon recargado en caliente.' -ForegroundColor Green
+```
+
+---
+
+### MS-07 — Eliminación de exposición de credenciales en historial de PowerShell
+
+#### 1. ID del Incidente / Vector de Ataque
+
+**V-07.** El informe forense localizó `ConsoleHost_history.txt` (6.496 bytes) con la contraseña de `yishiego` en texto plano: `net user yishiego EstuveAqui.1234 /add`.
+
+#### 2. Nueva Medida de Seguridad
+
+- Deshabilitar persistencia de historial PSReadLine (`HistorySaveStyle SaveNothing`).
+- Eliminar historiales existentes en todos los perfiles.
+- Habilitar **Transcripción de PowerShell** y **Script Block Logging** (Event ID 4104) en directorio con ACL restrictiva.
+
+#### 3. Justificación Técnica
+
+`PSReadLine.dll` escribe historial sin filtrado de secretos. `SaveNothing` elimina la persistencia en disco. La transcripción intercepta pipelines en `System.Management.Automation.dll` con ACL que impide borrado por usuarios estándar. Script Block Logging registra scripts ofuscados en canal protegido del Event Log.
+
+#### 4. Método de Aplicación
+
+```powershell
+# Deshabilitar historial via perfil del sistema
+$profilePath = 'C:\Windows\System32\WindowsPowerShell\v1.0\profile.ps1'
+$pslConfig   = @'
+
+if (Get-Module -Name PSReadLine -ErrorAction SilentlyContinue) {
+    Set-PSReadLineOption -HistorySaveStyle SaveNothing
+}
+'@
+if (-not (Test-Path $profilePath) -or -not (Select-String -Path $profilePath -Pattern 'SaveNothing' -Quiet)) {
+    Add-Content -Path $profilePath -Value $pslConfig -Encoding UTF8
+}
+
+# Eliminar historiales existentes
+Get-ChildItem 'C:\Users\*\AppData\Roaming\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt' `
+    -ErrorAction SilentlyContinue | Remove-Item -Force
+
+# Directorio de transcripción con ACL restrictiva
+$transcriptDir = 'C:\Windows\System32\Config\TxR\PSTranscripts'
+New-Item -ItemType Directory -Force -Path $transcriptDir | Out-Null
+$acl = Get-Acl $transcriptDir
+$acl.SetAccessRuleProtection($true, $false)
+$acl.Access | ForEach-Object { $acl.RemoveAccessRule($_) | Out-Null }
+$acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+    'NT AUTHORITY\SYSTEM', 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+$acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+    'BUILTIN\Administradores', 'ReadAndExecute', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+Set-Acl -Path $transcriptDir -AclObject $acl
+
+# Registro: Transcripción + Script Block Logging
+$psReg = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell'
+$trans = "$psReg\Transcription"
+$sbLog = "$psReg\ScriptBlockLogging"
+@($trans, $sbLog) | ForEach-Object { if (-not (Test-Path $_)) { New-Item -Path $_ -Force | Out-Null } }
+Set-ItemProperty -Path $trans -Name 'EnableTranscripting'     -Value 1 -Type DWord
+Set-ItemProperty -Path $trans -Name 'EnableInvocationHeader'  -Value 1 -Type DWord
+Set-ItemProperty -Path $trans -Name 'OutputDirectory'         -Value $transcriptDir -Type String
+Set-ItemProperty -Path $sbLog -Name 'EnableScriptBlockLogging'           -Value 1 -Type DWord
+Set-ItemProperty -Path $sbLog -Name 'EnableScriptBlockInvocationLogging' -Value 1 -Type DWord
+Write-Host '[+] MS-07 aplicada.' -ForegroundColor Green
+```
+
+**GPO:** `Configuración de equipo → Plantillas administrativas → Componentes de Windows → Windows PowerShell → Activar la transcripción de módulos / Activar el registro de bloques de script`
+
+---
+
+### MS-08 — Endurecimiento de política de bloqueo y contraseñas
+
+#### 1. ID del Incidente / Vector de Ataque
+
+**V-08.** Lockout configurado a 10 intentos / 15 minutos. Credenciales de `user2` comprometidas 21 días post-entrega.
+
+#### 2. Nueva Medida de Seguridad
+
+Umbral de bloqueo **3 intentos / 30 minutos**, longitud mínima **16 caracteres**, complejidad habilitada, historial de 24 contraseñas, expiración a 90 días.
+
+#### 3. Justificación Técnica
+
+SAM incrementa `BadPasswordCount` en cada fallo; al alcanzar `LockoutThreshold` activa `UF_LOCKOUT` (Event 4625, `0xC0000234`). Con 3 intentos y ventana de 30 minutos, la tasa efectiva queda en ~6 intentos/hora, inviable para diccionario en ejercicio Red Team. 16 caracteres eleva el espacio de búsqueda a ~2^104 combinaciones.
+
+#### 4. Método de Aplicación
+
+```powershell
+net accounts /lockoutthreshold:3
+net accounts /lockoutduration:30
+net accounts /lockoutwindow:15
+net accounts /minpwlen:16
+net accounts /maxpwage:90
+net accounts /uniquepw:24
+
+secedit /export /cfg C:\Windows\Temp\sec_pw.cfg /quiet
+(Get-Content C:\Windows\Temp\sec_pw.cfg) -replace 'PasswordComplexity = 0', 'PasswordComplexity = 1' |
+    Set-Content C:\Windows\Temp\sec_pw.cfg
+secedit /configure /db $env:windir\security\local.sdb /cfg C:\Windows\Temp\sec_pw.cfg /areas SECURITYPOLICY
+Remove-Item C:\Windows\Temp\sec_pw.cfg -Force
+Write-Host '[+] MS-08 aplicada.' -ForegroundColor Green
+net accounts
+```
+
+**GPO:** `Configuración de equipo → Configuración de seguridad → Directivas de cuenta → Directiva de bloqueo de cuenta → Umbral: 3 intentos`
+
+---
+
+### MS-09 — Prevención de apagado anti-forense
+
+#### 1. ID del Incidente / Vector de Ataque
+
+**V-09.** El Red Team ejecutó `shutdown /s /t 0` (correlacionado con Event 4647 y 1100 a las 13:48:09), destruyendo evidencia volátil en RAM.
+
+#### 2. Nueva Medida de Seguridad
+
+Revocar `SeShutdownPrivilege` de cuentas interactivas, auditar eventos 1074/4608, incluir `shutdown.exe` en reglas Sysmon (MS-06).
+
+#### 3. Justificación Técnica
+
+`shutdown.exe` requiere `SeShutdownPrivilege` para invocar `InitiateSystemShutdownEx()`. Revocarlo impide anti-forense volátil desde sesión interactiva. Los eventos 1074/4608 permiten correlacionar intentos de apagado con sesiones activas.
+
+#### 4. Método de Aplicación
+
+```powershell
+secedit /export /cfg C:\Windows\Temp\sec_shutdown.cfg /quiet
+$cfg = Get-Content C:\Windows\Temp\sec_shutdown.cfg | ForEach-Object {
+    if ($_ -match '^SeShutdownPrivilege\s*=') { 'SeShutdownPrivilege = ' } else { $_ }
+}
+$cfg | Set-Content C:\Windows\Temp\sec_shutdown.cfg -Encoding Unicode
+secedit /configure /db $env:windir\security\local.sdb /cfg C:\Windows\Temp\sec_shutdown.cfg /areas USER_RIGHTS
+Remove-Item C:\Windows\Temp\sec_shutdown.cfg -Force
+
+Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' `
+    -Name 'ShutdownWithoutLogon' -Value 0 -Type DWord
+auditpol /set /subcategory:"System Integrity" /success:enable /failure:enable
+Write-Host '[+] MS-09 aplicada.' -ForegroundColor Green
+```
+
+**GPO:** `Configuración de equipo → Configuración de seguridad → Asignación de derechos de usuario → Cerrar el sistema → Vaciar`
+
+---
+
+### MS-10 — Restricción de acceso a SecureCatalog y mínimo privilegio SQL
+
+#### 1. ID del Incidente / Vector de Ataque
+
+**V-10.** Tras compromiso de consola, el Red Team navegó por `C:\inetpub\wwwroot\SecureCatalog`. El hardening asignó `db_owner` al AppPool (pendiente documentado).
+
+#### 2. Nueva Medida de Seguridad
+
+- ACLs NTFS: denegar lectura a `user1` y `user2` en `inetpub\SecureCatalog`.
+- Degradar AppPool de `db_owner` a `db_datareader` + `db_datawriter`.
+- Habilitar Dynamic IP Restrictions en IIS.
+
+#### 3. Justificación Técnica
+
+Las Deny ACEs prevalecen sobre Allow en evaluación ACL del kernel, impidiendo lectura de código fuente incluso con sesión admin. Degradar SQL impide DDL y `xp_cmdshell` vía AppPool comprometido.
+
+#### 4. Método de Aplicación
+
+```powershell
+$appPath = 'C:\inetpub\wwwroot\SecureCatalog'
+$appPool = 'SecureCatalogPool'
+
+icacls $appPath /inheritance:r /T /C /Q
+icacls $appPath /grant "IIS AppPool\${appPool}:(OI)(CI)RX" /T
+icacls $appPath /grant "IUSR:(OI)(CI)RX" /T
+icacls $appPath /grant "SYSTEM:(OI)(CI)F" /T
+icacls $appPath /grant "BUILTIN\Administradores:(OI)(CI)F" /T
+@('user1', 'user2') | ForEach-Object { icacls $appPath /deny "${_}:(OI)(CI)RX" /T }
+
+$sql = @"
+USE SecureCatalogDb;
+IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name = 'IIS AppPool\SecureCatalogPool')
+BEGIN
+    ALTER ROLE db_owner DROP MEMBER [IIS AppPool\SecureCatalogPool];
+    ALTER ROLE db_datareader ADD MEMBER [IIS AppPool\SecureCatalogPool];
+    ALTER ROLE db_datawriter ADD MEMBER [IIS AppPool\SecureCatalogPool];
+END
+"@
+Invoke-Sqlcmd -ServerInstance 'localhost\SQLEXPRESS' -Query $sql -TrustServerCertificate
+Write-Host '[+] MS-10 aplicada.' -ForegroundColor Green
+```
+
+---
+
+## 3. Fase de Cierre Operativo — `Cierre-Operativo.ps1`
+
+Esta fase **no forma parte del flujo automático** que un LLM debe ejecutar al aplicar MS-01–MS-10. Se ejecuta **solo cuando el operador humano** (o el usuario del LLM) considere terminado el trabajo en la VM: hardening validado, pruebas OK, sin necesidad de más sesiones SSH/MCP.
+
+### 3.1 Objetivo
+
+Consolidar en un único script las acciones de **pechado** que en el despliegue original residían en `nuke.ps1`: cerrar el perímetro de gestión remota, eliminar SSH/MCP y dejar la VM en postura de entrega (solo HTTP/HTTPS expuestos), sin bloquear antes las vías por las que el Blue Team —o un agente LLM— opera.
+
+### 3.2 Despliegue del script (idempotente, ejecutar una vez durante el hardening)
+
+Generar el archivo en la VM. Puede hacerse desde SSH antes del cierre definitivo:
+
+```powershell
+$cierrePath = 'C:\Windows\System32\Drivers\en-US\NetworkData\Cierre-Operativo.ps1'
+
+$cierreScript = @'
+#Requires -RunAsAdministrator
+<#
+.SYNOPSIS
+  Pechado de la VM tras finalizar el trabajo Blue Team / LLM.
+  NO ejecutar hasta que el operador dé por cerrada la sesión de gestión.
+#>
+$ErrorActionPreference = 'Continue'
+$log = 'C:\Windows\System32\Config\TxR\Diagnostics\cierre_operativo.log'
+function Log($msg) {
+    $line = "[{0}] {1}" -f (Get-Date -Format 'o'), $msg
+    $line | Tee-Object -FilePath $log -Append
+}
+
+Log '=== INICIO Cierre-Operativo.ps1 ==='
+
+# --- 0. Marcar modo entrega (detiene Enforce-Firewall de reabrir SSH/MCP) ---
+New-Item -Path 'C:\Windows\System32\Config\TxR\Diagnostics\.modo_entrega' -ItemType File -Force | Out-Null
+
+# --- 1. Deshabilitar tarea de auto-remediación de firewall operativo ---
+Unregister-ScheduledTask -TaskName 'BlueTeam_FirewallEnforce' -Confirm:$false -ErrorAction SilentlyContinue
+Log 'Tarea BlueTeam_FirewallEnforce desregistrada.'
+
+# --- 2. Firewall: solo HTTP/HTTPS (eliminar SSH y MCP) ---
+Get-NetFirewallRule -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled True `
+    -DefaultInboundAction Block -DefaultOutboundAction Block
+New-NetFirewallRule -DisplayName 'Allow_HTTP_In'  -Direction Inbound -Protocol TCP -LocalPort 80  -Action Allow | Out-Null
+New-NetFirewallRule -DisplayName 'Allow_HTTPS_In' -Direction Inbound -Protocol TCP -LocalPort 443 -Action Allow | Out-Null
+Log 'Firewall: solo TCP 80/443 inbound.'
+
+# --- 3. Detener y eliminar MCP ---
+Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -match 'mcp_server\.py|FastMCP|mcp\.run' } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue |
+    ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }
+Log 'Procesos MCP detenidos.'
+
+# --- 4. Eliminar OpenSSH (como nuke.ps1 original) ---
+Stop-Service sshd -Force -ErrorAction SilentlyContinue
+Set-Service -Name sshd -StartupType Disabled -ErrorAction SilentlyContinue
+Remove-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 -ErrorAction SilentlyContinue
+Remove-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0 -ErrorAction SilentlyContinue
+Remove-Item 'C:\ProgramData\ssh' -Recurse -Force -ErrorAction SilentlyContinue
+Get-ChildItem 'C:\Users\*\.ssh' -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item 'C:\Users\user2\fix-ssh.ps1' -Force -ErrorAction SilentlyContinue
+Log 'OpenSSH eliminado.'
+
+# --- 5. Limpieza de historial y artefactos sensibles ---
+Clear-History -ErrorAction SilentlyContinue
+$histFile = (Get-PSReadLineOption).HistorySavePath
+if ($histFile -and (Test-Path $histFile)) { Remove-Item $histFile -Force }
+Remove-Item "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
+Log 'Historial y TEMP limpiados.'
+
+# --- 6. Recordatorio host VirtualBox (no automatizable desde guest) ---
+Log 'PENDIENTE EN HOST: eliminar NAT y restaurar 2 CPUs (ver plan §1.4).'
+
+Log '=== FIN Cierre-Operativo.ps1 — VM en modo entrega ==='
+Write-Host '[+] Cierre operativo completado. SSH/MCP cerrados. Solo HTTP/HTTPS.' -ForegroundColor Green
+'@
+
+New-Item -ItemType Directory -Force -Path (Split-Path $cierrePath) | Out-Null
+$cierreScript | Set-Content -Path $cierrePath -Encoding UTF8 -Force
+Write-Host "[+] Script desplegado en: $cierrePath" -ForegroundColor Cyan
+Write-Host '    NO ejecutar hasta finalizar el trabajo con la VM.' -ForegroundColor Yellow
+```
+
+### 3.3 Ejecución (solo bajo indicación explícita del operador)
+
+```powershell
+# Ejecutar en la VM cuando el operador/LLM haya terminado:
+powershell -NoProfile -ExecutionPolicy Bypass -File `
+  'C:\Windows\System32\Drivers\en-US\NetworkData\Cierre-Operativo.ps1'
+```
+
+**Efectos irreversibles en la sesión actual:** se cierran los puertos 22 y 8000, se desinstala OpenSSH y se detiene MCP. La conexión SSH activa puede cortarse al finalizar el script.
+
+### 3.4 Instrucciones para agentes LLM
+
+| Acción | Cuándo |
+|--------|--------|
+| Aplicar §1 y MS-01–MS-10 | Siempre que se esté endureciendo o reintentando etapas |
+| Desplegar `Cierre-Operativo.ps1` (§3.2) | Tras el primer hardening exitoso, **sin ejecutarlo** |
+| **Ejecutar** `Cierre-Operativo.ps1` | **Solo** cuando el usuario indique explícitamente: *«ejecuta el cierre operativo»*, *«pecha la VM»*, etc. |
+| Reabrir SSH/MCP tras un cierre | Fuera de alcance de este plan; requiere restauración manual (`3_3_Restauracion_MCP.md`) |
+
+---
+
+## 4. Orden de Ejecución y Dependencias
+
+```mermaid
+flowchart LR
+    S0[§1_Saneamiento] --> S1[MS01_user1_logon]
+    S1 --> S2[MS02_logon_screen]
+    S2 --> S3[MS08_passwords]
+    S3 --> S4[MS03_firewall]
+    S4 --> S5[MS04_bitlocker]
+    S5 --> S6[MS05_backdoor]
+    S6 --> S7[MS06_sysmon]
+    S7 --> S8[MS07_PS_history]
+    S8 --> S9[MS09_shutdown]
+    S9 --> S10[MS10_ACLs_SQL]
+    S10 --> S11[Reinicio_WDAC]
+    S11 --> S12[Desplegar_Cierre_Operativo_ps1]
+    S12 -.->|manual| S13[Ejecutar_Cierre_Operativo]
+```
+
+| Fase | Medidas | Reinicio | Notas |
+|------|---------|----------|-------|
+| 0 — Saneamiento | §1.1 – §1.4 | No | Prioridad inmediata; §1.4 en host: eliminar NAT y restaurar 2 CPUs |
+| 1 — Identidad | MS-01, MS-02, MS-08 | No | Crear `user1` **antes** de denegar `user2` |
+| 2 — Perímetro | MS-03, MS-04, MS-05 | No | Tareas SYSTEM sin reinicio |
+| 3 — Telemetría | MS-06, MS-07, MS-09 | No | Sysmon recarga en caliente |
+| 4 — Aplicación | MS-10 | No | Verificar arranque de SecureCatalog |
+| 5 — WDAC | MS-03, MS-04, MS-05 | **Sí** | Ventana de mantenimiento |
+| 6 — Despliegue cierre | §3.2 | No | Crear `Cierre-Operativo.ps1` **sin ejecutar** |
+| 7 — Cierre entrega | §3.3 | No | **Manual** — corta SSH/MCP; solo con OK del operador |
+
+> **Advertencia:** Verificar logon con `user1` antes de aplicar WDAC y denegar logon a `user2`.  
+> **Advertencia:** No ejecutar §3.3 hasta confirmación explícita del operador; antes de eso, los puertos 22 y 8000 deben permanecer abiertos.
+
+### Resumen consolidado de prioridades
+
+| ID | Medida | Vector | Prioridad |
+|----|--------|--------|-----------|
+| §1 | Saneamiento inmediato | V-03, V-04, V-05 | **INMEDIATA** |
+| MS-03 | Firewall GPO + WDAC + auto-remediación | V-03 | **INMEDIATA** |
+| MS-04 | BitLocker TPM-only + WDAC | V-04 | **INMEDIATA** |
+| MS-05 | AdminGuard + WDAC net.exe | V-05 | **INMEDIATA** |
+| MS-06 | Sysmon consola interactiva | V-06 | **ALTA** |
+| MS-07 | Historial PS + Transcripción + SBL | V-07 | **ALTA** |
+| MS-08 | Lockout 3 + contraseñas 16 chars | V-08 | **ALTA** |
+| MS-09 | SeShutdownPrivilege | V-09 | **ALTA** |
+| MS-10 | ACLs + SQL least privilege | V-10 | **MEDIA** |
+| MS-01 | Separación privilegios + WHfB | V-01 | **MEDIA** |
+| MS-02 | Pantalla logon | V-02 | **MEDIA** |
+| §3 | Cierre operativo | — | **MANUAL** (post-trabajo) |
+
+---
+
+## 5. Verificación Post-Aplicación
+
+### 5.1 Checklist de cumplimiento (modo operativo — antes de §3.3)
+
+| # | Control | Comando | Resultado esperado |
+|---|---------|---------|-------------------|
+| 1 | Backdoor eliminado | `Get-LocalUser -Name 'yishiego' -EA SilentlyContinue` | Sin resultado |
+| 2 | Whitelist administradores | `Get-LocalGroupMember -Group 'Administradores'` | Solo `user2` |
+| 3 | Firewall activo | `Get-NetFirewallProfile \| Select Enabled` | `True` todos |
+| 3b | SSH/MCP abiertos | `Get-NetFirewallRule -DisplayName Allow_SSH_MCP,Allow_MCP_SSE \| Select Enabled` | `True` (hasta §3.3) |
+| 4 | BitLocker activo | `Get-BitLockerVolume -MountPoint 'C:'` | `ProtectionStatus: On` |
+| 5 | Sysmon captura consola | `whoami` en cmd → Sysmon ID 1 | Evento registrado |
+| 6 | Lockout ≤ 3 | `net accounts` | Umbral 3 |
+| 7 | Sin último usuario logon | `Get-ItemProperty ...\Policies\System dontdisplaylastusername` | `1` |
+| 8 | user1 operativo | Login con `user1` | Éxito sin admin |
+| 9 | user2 denegado | Login con `user2` | Denegado |
+| 10 | Sin historial PS | `Test-Path C:\Users\*\...\ConsoleHost_history.txt` | `False` |
+| 11 | WDAC activo | `CiTool.exe --list-policies` | Políticas Deny listadas |
+| 12 | Sin adaptador NAT | `ipconfig` en guest | Solo `192.168.56.x`; sin `10.0.2.x` |
+| 13 | CPUs restaurados | `(Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors` | `2` |
+| 14 | Script cierre desplegado | `Test-Path ...\NetworkData\Cierre-Operativo.ps1` | `True` |
+| 15 | sshd activo (pre-cierre) | `Get-Service sshd \| Select Status, StartType` | `Running` / `Automatic` |
+
+### 5.1b Checklist post-cierre (solo tras ejecutar §3.3)
+
+| # | Control | Comando | Resultado esperado |
+|---|---------|---------|-------------------|
+| P1 | SSH eliminado | `Get-Service sshd -EA SilentlyContinue` | Sin servicio o `Disabled` |
+| P2 | Solo HTTP/HTTPS | `Get-NetFirewallRule -Enabled True \| Select DisplayName` | Solo `Allow_HTTP_In`, `Allow_HTTPS_In` |
+| P3 | MCP detenido | `Get-NetTCPConnection -LocalPort 8000 -EA SilentlyContinue` | Sin listeners |
+| P4 | Marcador entrega | `Test-Path ...\Diagnostics\.modo_entrega` | `True` |
+
+### 5.2 Script de verificación consolidado
+
+```powershell
+function Test-PostIncidentHardening {
+    $r = @()
+    $r += [PSCustomObject]@{ Control='Backdoor eliminado'; Pass=-not (Get-LocalUser 'yishiego' -EA SilentlyContinue) }
+    $r += [PSCustomObject]@{ Control='Firewall habilitado'; Pass=(Get-NetFirewallProfile|?{-not $_.Enabled}).Count -eq 0 }
+    $r += [PSCustomObject]@{ Control='BitLocker activo'; Pass=(Get-BitLockerVolume 'C:').ProtectionStatus -eq 'On' }
+    $r += [PSCustomObject]@{ Control='user1 existe'; Pass=[bool](Get-LocalUser 'user1' -EA SilentlyContinue) }
+    $r += [PSCustomObject]@{ Control='dontdisplaylastusername'; Pass=(Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name dontdisplaylastusername -EA SilentlyContinue).dontdisplaylastusername -eq 1 }
+    $r | Format-Table -AutoSize
+    if ($r | Where-Object { -not $_.Pass }) { Write-Host '[!] Controles FALLIDOS.' -ForegroundColor Red }
+    else { Write-Host '[+] Todos PASS.' -ForegroundColor Green }
+}
+Test-PostIncidentHardening
+```
+
+### 5.3 Prueba de regresión controlada
+
+Desde sesión `user1`:
+
+```powershell
+net user testuser Test1234! /add           # Esperado: WDAC deny o rollback MS-05
+netsh advfirewall set allprofiles state off # Esperado: WDAC deny o MS-03 restore
+manage-bde -off C:                            # Esperado: WDAC deny
+shutdown /s /t 60                            # Esperado: SeShutdownPrivilege deny
+```
+
+### 5.4 Indicadores de compromiso (IoC)
+
+| Tipo | Indicador | Event ID |
+|------|-----------|----------|
+| Cuenta | Creación local no en allowlist `{user2}` | 4720 |
+| Grupo | Adición no autorizada a `Administradores` | 4732 |
+| Proceso | `netsh.exe` con `advfirewall` | Sysmon 1 |
+| Proceso | `manage-bde.exe` con `-off` | Sysmon 1 |
+| Autenticación | LogonType 2 fuera de horario operativo | 4624 |
+| Firewall | Política deshabilitada | 4954 |
+| Watchdog | Event ID 9001 en Application Log | 9001 |
+| Comando | `ConsoleHost_history.txt` con contenido | — |
+
+---
+
+## 6. Matriz de Trazabilidad
+
+| Medida | Vector | Control hardening inicial | Brecha | Control fusionado |
+|--------|--------|--------------------------|--------|-------------------|
+| §1 | V-03,V-04,V-05 | `nuke.ps1`, BitLocker | Comprometidos | Saneamiento inmediato |
+| MS-01 | V-01 | Honeytoken, rename admin | `user1` pendiente | PAW + WHfB |
+| MS-02 | V-02 | `dontdisplaylastusername` | Fallido | Registro + GPO |
+| MS-03 | V-03 | Firewall restrictivo | Sin anti-tamper | GPO + WDAC + tarea SYSTEM (puertos 22/8000 hasta §3) |
+| MS-04 | V-04 | BitLocker TPM-only | `manage-bde` libre | WDAC + GPO FVE + recuperación (sin PIN) |
+| MS-05 | V-05 | LOLBins parciales | `net.exe` libre | WDAC + AdminGuard + audit |
+| MS-06 | V-06 | Sysmon ofuscado | Solo reglas IIS | Reglas consola + args |
+| MS-07 | V-07 | Sin control PS | Historial en claro | SaveNothing + SBL + transcripción |
+| MS-08 | V-08 | Lockout 10 intentos | Insuficiente | Lockout 3 + 16 chars |
+| MS-09 | V-09 | Ninguno | Sin restricción | SeShutdownPrivilege revocado |
+| MS-10 | V-10 | `db_owner` AppPool | Sobre-privilegiado | ACLs + SQL least privilege |
+| §1.4 | — | 2 CPUs; NAT solo en instalación | NAT activo; 4 CPUs | Eliminar NAT; restaurar 2 CPUs |
+| §3 | — | `nuke.ps1` al entregar | SSH/MCP abiertos durante trabajo | `Cierre-Operativo.ps1` manual al finalizar |
+
+---
+
+## 7. Referencias
+
+- Informe forense post-incidente — WIN-VNQSUL89MUA (`3_informe_forense.md`)
+- Guía de despliegue SecureCatalog — Hardening Blue Team (`1_blue_team_instrucciones.txt`, `nuke.ps1`)
+- Restauración SSH/MCP — `3_3_Restauracion_MCP.md`
+- Planes individuales fusionados: `5(composer)_` y `5(sonnet)_plan_securizacion_post_incidente.md`
+- MITRE ATT&CK: T1078, T1562.004, T1486, T1070.004
+
+---
+
+*Fin del Plan de Securización Post-Incidente Fusionado — WIN-VNQSUL89MUA / SecureCatalog*
